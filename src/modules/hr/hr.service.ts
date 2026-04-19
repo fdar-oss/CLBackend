@@ -234,6 +234,76 @@ export class HrService {
     });
   }
 
+  // ─── Employee Shifts / Scheduling ──────────────────────────────────────────
+
+  async createShift(data: any) {
+    return this.prisma.employeeShift.create({
+      data: { ...data, date: new Date(data.date) },
+      include: { employee: { select: { fullName: true, employeeCode: true } }, branch: { select: { name: true } } },
+    });
+  }
+
+  async getShifts(tenantId: string, filters: any = {}) {
+    const { branchId, from, to, employeeId } = filters;
+    return this.prisma.employeeShift.findMany({
+      where: {
+        employee: { tenantId },
+        ...(branchId && { branchId }),
+        ...(employeeId && { employeeId }),
+        ...(from && to && { date: { gte: new Date(from), lte: new Date(to) } }),
+      },
+      include: {
+        employee: { select: { fullName: true, employeeCode: true, baseSalary: true, salaryType: true } },
+        branch: { select: { name: true } },
+      },
+      orderBy: [{ date: 'asc' }, { startTime: 'asc' }],
+    });
+  }
+
+  async deleteShift(id: string) {
+    await this.prisma.employeeShift.delete({ where: { id } });
+    return { deleted: true };
+  }
+
+  async getLaborSummary(tenantId: string, from: string, to: string, branchId?: string) {
+    const shifts = await this.getShifts(tenantId, { branchId, from, to });
+
+    // Calculate hours per employee
+    const empMap: Record<string, { name: string; code: string; salary: number; salaryType: string; totalHours: number; shifts: number }> = {};
+    for (const s of shifts) {
+      const key = s.employeeId;
+      if (!empMap[key]) {
+        empMap[key] = {
+          name: s.employee.fullName,
+          code: s.employee.employeeCode,
+          salary: Number(s.employee.baseSalary),
+          salaryType: s.employee.salaryType,
+          totalHours: 0,
+          shifts: 0,
+        };
+      }
+      // Parse hours from startTime/endTime (e.g. "09:00" to "17:00" = 8h)
+      const [sh, sm] = s.startTime.split(':').map(Number);
+      const [eh, em] = s.endTime.split(':').map(Number);
+      const hours = (eh + em / 60) - (sh + sm / 60);
+      empMap[key].totalHours += hours > 0 ? hours : hours + 24; // handle overnight
+      empMap[key].shifts += 1;
+    }
+
+    const employees = Object.values(empMap).map(e => {
+      // For monthly salary: hourly = salary / 208 (26 days × 8 hours)
+      const hourlyRate = e.salaryType === 'MONTHLY' ? e.salary / 208 : e.salary;
+      const laborCost = e.totalHours * hourlyRate;
+      return { ...e, hourlyRate, laborCost };
+    });
+
+    const totalLaborCost = employees.reduce((s, e) => s + e.laborCost, 0);
+    const totalHours = employees.reduce((s, e) => s + e.totalHours, 0);
+    const totalShifts = shifts.length;
+
+    return { employees, totalLaborCost, totalHours, totalShifts };
+  }
+
   async approvePayroll(periodId: string) {
     return this.prisma.payrollPeriod.update({
       where: { id: periodId },

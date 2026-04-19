@@ -36,6 +36,12 @@ export class PosController {
     return this.posService.getActiveShift(branchId || u.branchId || '');
   }
 
+  @Get('shifts/closed')
+  @ApiOperation({ summary: 'List closed shifts with Z-report data' })
+  getClosedShifts(@CurrentUser() u: JwtPayload, @Query('branchId') branchId?: string, @Query('limit') limit?: string) {
+    return this.posService.getClosedShifts(branchId || u.branchId || '', parseInt(limit || '50', 10));
+  }
+
   @Post('shifts/:id/cash-movement')
   @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER, UserRole.CASHIER)
   @ApiOperation({ summary: 'Record cash in/out movement' })
@@ -90,7 +96,9 @@ export class PosController {
   @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER, UserRole.CASHIER)
   @ApiOperation({ summary: 'Process payment for an order (supports split payment)' })
   processPayment(@CurrentUser() u: JwtPayload, @Param('id') id: string, @Body() body: any) {
-    return this.posService.processPayment(u.tenantId, id, body.payments);
+    return this.posService.processPayment(
+      u.tenantId, id, body.payments, body.customerLeft !== false, body.paymentMethod, body.customer,
+    );
   }
 
   @Post('orders/:id/refund')
@@ -127,5 +135,23 @@ export class PosController {
     return this.posService.updateTableStatus(
       body.branchId || u.branchId || '', id, body.status,
     );
+  }
+
+  // ─── KDS ─────────────────────────────────────────────────────────────────────
+
+  @Get('kds/tickets')
+  @ApiOperation({ summary: 'List active kitchen/bar tickets for branch' })
+  getKdsTickets(
+    @CurrentUser() u: JwtPayload,
+    @Query('branchId') branchId: string,
+    @Query('stationType') stationType?: string,
+  ) {
+    return this.posService.getKdsTickets(branchId || u.branchId || '', stationType);
+  }
+
+  @Patch('kds/tickets/:id/status')
+  @ApiOperation({ summary: 'Bump kitchen ticket to next status' })
+  bumpTicket(@Param('id') id: string, @Body() body: { status: string }) {
+    return this.posService.bumpTicket(id, body.status);
   }
 }

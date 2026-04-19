@@ -12,6 +12,12 @@ import { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 export class FinanceController {
   constructor(private svc: FinanceService) {}
 
+  @Get('dashboard')
+  @ApiOperation({ summary: 'Real-time dashboard: today revenue, top sellers, hourly, weekly trend' })
+  getDashboard(@CurrentUser() u: JwtPayload, @Query('branchId') branchId?: string) {
+    return this.svc.getDashboard(u.tenantId, branchId || u.branchId || undefined);
+  }
+
   @Post('expenses')
   @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER, UserRole.FINANCE_MANAGER)
   createExpense(@CurrentUser() u: JwtPayload, @Body() body: any) {

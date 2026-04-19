@@ -48,7 +48,10 @@ export class KdsGateway implements OnGatewayConnection, OnGatewayDisconnect {
         ...(data.status === 'READY' && { completedAt: new Date() }),
         ...(data.status === 'BUMPED' && { bumpedAt: new Date() }),
       },
-      include: { station: true, order: { select: { branchId: true, orderNumber: true } } },
+      include: {
+        station: true,
+        order: { select: { branchId: true, orderNumber: true, orderType: true, table: { select: { number: true, section: true } } } },
+      },
     });
 
     // Broadcast to the branch room
@@ -66,42 +69,92 @@ export class KdsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   private async createKitchenTickets(order: any) {
-    // Get all stations for this branch
-    const stations = await this.prisma.kitchenStation.findMany({
+    // Ensure default stations exist (Kitchen + Bar)
+    let stations = await this.prisma.kitchenStation.findMany({
       where: { branchId: order.branchId, isActive: true },
     });
+    if (!stations.find((s) => s.type === 'KITCHEN')) {
+      const k = await this.prisma.kitchenStation.create({
+        data: { branchId: order.branchId, name: 'Kitchen', type: 'KITCHEN' },
+      });
+      stations.push(k);
+    }
+    if (!stations.find((s) => s.type === 'BAR')) {
+      const b = await this.prisma.kitchenStation.create({
+        data: { branchId: order.branchId, name: 'Bar', type: 'BAR' },
+      });
+      stations.push(b);
+    }
 
-    if (!stations.length) return;
+    const kitchenStation = stations.find((s) => s.type === 'KITCHEN')!;
+    const barStation = stations.find((s) => s.type === 'BAR')!;
 
-    // For now, send all items to the first station (can be enhanced to route by item type)
-    const defaultStation = stations[0];
-    const count = await this.prisma.kitchenTicket.count({
+    // Look up itemType for each ordered menu item
+    const itemIds = order.orderItems.map((i: any) => i.menuItemId);
+    const menuItems = await this.prisma.menuItem.findMany({
+      where: { id: { in: itemIds } },
+      select: { id: true, itemType: true },
+    });
+    const typeMap = new Map(menuItems.map((m) => [m.id, m.itemType]));
+
+    // Route by type: BEVERAGE → bar, everything else → kitchen
+    const barItems: any[] = [];
+    const kitchenItems: any[] = [];
+    for (const item of order.orderItems) {
+      const t = typeMap.get(item.menuItemId);
+      const slim = {
+        name: item.itemName,
+        quantity: item.quantity,
+        notes: item.notes,
+        modifiers: item.modifiers?.map((m: any) => m.modifierName) || [],
+      };
+      if (t === 'BEVERAGE') barItems.push(slim); else kitchenItems.push(slim);
+    }
+
+    const totalCount = await this.prisma.kitchenTicket.count({
       where: { order: { branchId: order.branchId } },
     });
-    const ticketNumber = `KOT-${String(count + 1).padStart(4, '0')}`;
 
-    const ticket = await this.prisma.kitchenTicket.create({
-      data: {
-        orderId: order.id,
-        stationId: defaultStation.id,
-        ticketNumber,
-        status: 'PENDING',
-        items: order.orderItems.map((i: any) => ({
-          name: i.itemName,
-          quantity: i.quantity,
-          notes: i.notes,
-          modifiers: i.modifiers?.map((m: any) => m.modifierName) || [],
-        })),
-        notes: order.notes,
-      },
-      include: {
-        station: true,
-        order: { select: { orderNumber: true, orderType: true, table: true } },
-      },
-    });
+    const tickets: any[] = [];
+    let counter = totalCount;
+    if (kitchenItems.length > 0) {
+      counter += 1;
+      tickets.push(await this.prisma.kitchenTicket.create({
+        data: {
+          orderId: order.id,
+          stationId: kitchenStation.id,
+          ticketNumber: `KOT-${String(counter).padStart(4, '0')}`,
+          status: 'PENDING',
+          items: kitchenItems,
+          notes: order.notes,
+        },
+        include: {
+          station: true,
+          order: { select: { orderNumber: true, orderType: true, table: true } },
+        },
+      }));
+    }
+    if (barItems.length > 0) {
+      counter += 1;
+      tickets.push(await this.prisma.kitchenTicket.create({
+        data: {
+          orderId: order.id,
+          stationId: barStation.id,
+          ticketNumber: `BAR-${String(counter).padStart(4, '0')}`,
+          status: 'PENDING',
+          items: barItems,
+          notes: order.notes,
+        },
+        include: {
+          station: true,
+          order: { select: { orderNumber: true, orderType: true, table: true } },
+        },
+      }));
+    }
 
-    // Broadcast to branch KDS screens
-    this.server.to(`branch:${order.branchId}`).emit('newTicket', ticket);
+    for (const t of tickets) {
+      this.server.to(`branch:${order.branchId}`).emit('newTicket', t);
+    }
   }
 
   // Get all active tickets for a branch

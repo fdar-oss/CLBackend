@@ -99,6 +99,120 @@ export class FinanceService {
     });
   }
 
+  // ─── Dashboard (real-time from orders) ───────────────────────────────────────
+
+  async getDashboard(tenantId: string, branchId?: string) {
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const weekStart = new Date(todayStart);
+    weekStart.setDate(weekStart.getDate() - 7);
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const branchFilter = branchId ? { branchId } : {};
+
+    // Today's completed orders
+    const todayOrders = await this.prisma.posOrder.findMany({
+      where: { tenantId, ...branchFilter, status: 'COMPLETED', completedAt: { gte: todayStart } },
+      include: { payments: true, orderItems: true },
+    });
+
+    // Week orders
+    const weekOrders = await this.prisma.posOrder.findMany({
+      where: { tenantId, ...branchFilter, status: 'COMPLETED', completedAt: { gte: weekStart } },
+      include: { payments: true },
+    });
+
+    // Today stats
+    const todayRevenue = todayOrders.reduce((s, o) => s + Number(o.total), 0);
+    const todayTax = todayOrders.reduce((s, o) => s + Number(o.taxAmount), 0);
+    const todaySubtotal = todayOrders.reduce((s, o) => s + Number(o.subtotal), 0);
+    const todayCash = todayOrders.flatMap(o => o.payments).filter(p => p.method === 'CASH').reduce((s, p) => s + Number(p.amount), 0);
+    const todayCard = todayOrders.flatMap(o => o.payments).filter(p => p.method === 'CARD').reduce((s, p) => s + Number(p.amount), 0);
+    const todayBank = todayOrders.flatMap(o => o.payments).filter(p => p.method === 'BANK_TRANSFER').reduce((s, p) => s + Number(p.amount), 0);
+    const todayAvgOrder = todayOrders.length > 0 ? todayRevenue / todayOrders.length : 0;
+
+    // Week stats
+    const weekRevenue = weekOrders.reduce((s, o) => s + Number(o.total), 0);
+
+    // Top selling items today
+    const itemCounts: Record<string, { name: string; qty: number; revenue: number }> = {};
+    for (const order of todayOrders) {
+      for (const item of order.orderItems) {
+        const key = item.itemName;
+        if (!itemCounts[key]) itemCounts[key] = { name: key, qty: 0, revenue: 0 };
+        itemCounts[key].qty += item.quantity;
+        itemCounts[key].revenue += Number(item.lineTotal);
+      }
+    }
+    const topSellers = Object.values(itemCounts).sort((a, b) => b.qty - a.qty).slice(0, 10);
+
+    // Hourly breakdown today
+    const hourly: { hour: string; orders: number; revenue: number }[] = [];
+    for (let h = 0; h < 24; h++) {
+      const hourOrders = todayOrders.filter(o => {
+        const completed = new Date(o.completedAt!);
+        return completed.getHours() === h;
+      });
+      if (hourOrders.length > 0 || h >= 8 && h <= 23) {
+        hourly.push({
+          hour: `${h.toString().padStart(2, '0')}:00`,
+          orders: hourOrders.length,
+          revenue: hourOrders.reduce((s, o) => s + Number(o.total), 0),
+        });
+      }
+    }
+
+    // Daily revenue for last 7 days
+    const dailyRevenue: { date: string; revenue: number; orders: number }[] = [];
+    for (let d = 6; d >= 0; d--) {
+      const day = new Date(todayStart);
+      day.setDate(day.getDate() - d);
+      const nextDay = new Date(day);
+      nextDay.setDate(nextDay.getDate() + 1);
+      const dayOrders = weekOrders.filter(o => {
+        const c = new Date(o.completedAt!);
+        return c >= day && c < nextDay;
+      });
+      dailyRevenue.push({
+        date: day.toISOString().slice(0, 10),
+        revenue: dayOrders.reduce((s, o) => s + Number(o.total), 0),
+        orders: dayOrders.length,
+      });
+    }
+
+    // Order type breakdown today
+    const dineIn = todayOrders.filter(o => o.orderType === 'DINE_IN').length;
+    const takeaway = todayOrders.filter(o => o.orderType === 'TAKEAWAY').length;
+    const delivery = todayOrders.filter(o => o.orderType === 'DELIVERY').length;
+
+    // Pending orders right now
+    const pendingCount = await this.prisma.posOrder.count({
+      where: { tenantId, ...branchFilter, status: { in: ['PENDING', 'CONFIRMED', 'IN_PROGRESS'] } },
+    });
+
+    return {
+      today: {
+        revenue: todayRevenue,
+        subtotal: todaySubtotal,
+        tax: todayTax,
+        orders: todayOrders.length,
+        avgOrder: todayAvgOrder,
+        cash: todayCash,
+        card: todayCard,
+        bank: todayBank,
+      },
+      week: {
+        revenue: weekRevenue,
+        orders: weekOrders.length,
+      },
+      topSellers,
+      hourly: hourly.filter(h => parseInt(h.hour) >= 8),
+      dailyRevenue,
+      orderTypes: { dineIn, takeaway, delivery },
+      pendingOrders: pendingCount,
+    };
+  }
+
   // ─── Reports ─────────────────────────────────────────────────────────────────
 
   async getSalesReport(tenantId: string, from: string, to: string, branchId?: string) {

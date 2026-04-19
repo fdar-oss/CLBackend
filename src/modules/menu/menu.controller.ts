@@ -40,7 +40,7 @@ export class MenuController {
   }
 
   @Delete('categories/:id')
-  @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER)
+  @Roles(UserRole.TENANT_OWNER)
   deleteCategory(@CurrentUser() u: JwtPayload, @Param('id') id: string) {
     return this.menuService.deleteCategory(u.tenantId, id);
   }
@@ -74,10 +74,48 @@ export class MenuController {
     return this.menuService.updateItem(u.tenantId, id, body);
   }
 
+  @Patch('items/:id/toggle')
+  @Roles(UserRole.TENANT_OWNER)
+  @ApiOperation({ summary: 'Toggle item active/inactive (admin only)' })
+  toggleItem(@CurrentUser() u: JwtPayload, @Param('id') id: string) {
+    return this.menuService.toggleItem(u.tenantId, id);
+  }
+
   @Delete('items/:id')
-  @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER)
+  @Roles(UserRole.TENANT_OWNER)
+  @ApiOperation({ summary: 'Permanently delete a menu item (admin only)' })
   deleteItem(@CurrentUser() u: JwtPayload, @Param('id') id: string) {
     return this.menuService.deleteItem(u.tenantId, id);
+  }
+
+  // ─── Variants ───────────────────────────────────────────────────────────────
+
+  @Post('items/:id/variants')
+  @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER)
+  @ApiOperation({ summary: 'Add a variant to a menu item' })
+  createVariant(@Param('id') id: string, @Body() body: any) {
+    return this.menuService.createVariant(id, body);
+  }
+
+  @Patch('variants/:variantId')
+  @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER)
+  @ApiOperation({ summary: 'Update a variant' })
+  updateVariant(@Param('variantId') variantId: string, @Body() body: any) {
+    return this.menuService.updateVariant(variantId, body);
+  }
+
+  @Delete('variants/:variantId')
+  @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER)
+  @ApiOperation({ summary: 'Delete a variant' })
+  deleteVariant(@Param('variantId') variantId: string) {
+    return this.menuService.deleteVariant(variantId);
+  }
+
+  @Post('items/:id/variants/bulk')
+  @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER)
+  @ApiOperation({ summary: 'Set all variants for an item (replaces existing)' })
+  setVariants(@Param('id') id: string, @Body() body: { variants: any[] }) {
+    return this.menuService.setVariants(id, body.variants);
   }
 
   // ─── Modifiers ──────────────────────────────────────────────────────────────

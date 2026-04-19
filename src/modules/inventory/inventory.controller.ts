@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Patch, Body, Param, Query,
+  Controller, Get, Post, Patch, Delete, Body, Param, Query,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { InventoryService } from './inventory.service';
@@ -56,15 +56,22 @@ export class InventoryController {
   }
 
   @Post('recipes/:menuItemId')
-  @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER)
-  @ApiOperation({ summary: 'Create or update recipe for a menu item' })
+  @Roles(UserRole.TENANT_OWNER)
+  @ApiOperation({ summary: 'Create or update recipe (admin only)' })
   upsertRecipe(@Param('menuItemId') menuItemId: string, @Body() body: any) {
     return this.inventoryService.upsertRecipe(menuItemId, body);
   }
 
   @Get('recipes/:menuItemId')
-  getRecipe(@Param('menuItemId') menuItemId: string) {
-    return this.inventoryService.getRecipe(menuItemId);
+  @ApiOperation({ summary: 'Get recipe (pass ?variantId= for variant-specific)' })
+  getRecipe(@Param('menuItemId') menuItemId: string, @Query('variantId') variantId?: string) {
+    return this.inventoryService.getRecipe(menuItemId, variantId);
+  }
+
+  @Get('recipes/:menuItemId/all')
+  @ApiOperation({ summary: 'Get all recipes for a menu item (base + per-variant)' })
+  getRecipesForItem(@Param('menuItemId') menuItemId: string) {
+    return this.inventoryService.getRecipesForItem(menuItemId);
   }
 
   @Post('stock-count')
@@ -96,5 +103,35 @@ export class InventoryController {
   @ApiOperation({ summary: 'Create a stock location for a branch (e.g. Bar, Cold Room)' })
   createLocation(@Body() body: any) {
     return this.inventoryService.createLocation(body.branchId, body);
+  }
+
+  // ─── Cost Analysis ──────────────────────────────────────────────────────────
+
+  @Get('cost-analysis')
+  @ApiOperation({ summary: 'Get cost analysis for all menu items' })
+  getCostAnalysis(@CurrentUser() u: JwtPayload) {
+    return this.inventoryService.getCostAnalysis(u.tenantId);
+  }
+
+  // ─── Packaging Rules ────────────────────────────────────────────────────────
+
+  @Get('packaging-rules')
+  @ApiOperation({ summary: 'List packaging rules' })
+  getPackagingRules(@CurrentUser() u: JwtPayload) {
+    return this.inventoryService.getPackagingRules(u.tenantId);
+  }
+
+  @Post('packaging-rules')
+  @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER)
+  @ApiOperation({ summary: 'Create a packaging rule' })
+  createPackagingRule(@CurrentUser() u: JwtPayload, @Body() body: any) {
+    return this.inventoryService.createPackagingRule(u.tenantId, body);
+  }
+
+  @Delete('packaging-rules/:id')
+  @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER)
+  @ApiOperation({ summary: 'Delete a packaging rule' })
+  deletePackagingRule(@Param('id') id: string) {
+    return this.inventoryService.deletePackagingRule(id);
   }
 }

@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Patch, Body, Param, Query } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Body, Param, Query } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { HrService } from './hr.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -108,5 +108,32 @@ export class HrController {
   @Patch('payroll/periods/:id/approve') @Roles(UserRole.TENANT_OWNER, UserRole.FINANCE_MANAGER)
   approvePayroll(@Param('id') id: string) {
     return this.svc.approvePayroll(id);
+  }
+
+  // ─── Employee Shifts / Scheduling ────────────────────────────────────────────
+
+  @Post('shifts')
+  @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER, UserRole.HR_MANAGER)
+  @ApiOperation({ summary: 'Schedule an employee shift' })
+  createShift(@Body() body: any) {
+    return this.svc.createShift(body);
+  }
+
+  @Get('shifts')
+  @ApiOperation({ summary: 'Get employee shifts for a date range' })
+  getShifts(@CurrentUser() u: JwtPayload, @Query() filters: any) {
+    return this.svc.getShifts(u.tenantId, filters);
+  }
+
+  @Delete('shifts/:id')
+  @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER, UserRole.HR_MANAGER)
+  deleteShift(@Param('id') id: string) {
+    return this.svc.deleteShift(id);
+  }
+
+  @Get('labor-summary')
+  @ApiOperation({ summary: 'Get labor cost summary for date range' })
+  getLaborSummary(@CurrentUser() u: JwtPayload, @Query('from') from: string, @Query('to') to: string, @Query('branchId') branchId?: string) {
+    return this.svc.getLaborSummary(u.tenantId, from, to, branchId || undefined);
   }
 }

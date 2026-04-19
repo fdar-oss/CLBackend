@@ -48,7 +48,7 @@ export class ProcurementService {
     const count = await this.prisma.purchaseOrder.count({ where: { tenantId } });
     const poNumber = `PO-${new Date().getFullYear()}-${String(count + 1).padStart(5, '0')}`;
 
-    const { lines, ...poData } = data;
+    const { lines, expectedDate, ...poData } = data;
     const subtotal = lines.reduce(
       (s: number, l: any) => s + l.quantity * l.unitPrice, 0,
     );
@@ -60,6 +60,7 @@ export class ProcurementService {
       data: {
         tenantId,
         ...poData,
+        ...(expectedDate && { expectedDate: new Date(expectedDate) }),
         poNumber,
         createdById: userId,
         subtotal,

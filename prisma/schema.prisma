@@ -71,6 +71,11 @@ enum MenuItemType {
   OTHER
 }
 
+enum ItemSize {
+  SMALL
+  LARGE
+}
+
 enum SelectionType {
   SINGLE
   MULTIPLE
@@ -391,6 +396,7 @@ model Tenant {
   discounts         Discount[]
   stockCategories   StockCategory[]
   stockItems        StockItem[]
+  packagingRules    PackagingRule[]
   vendors           Vendor[]
   customers         Customer[]
   employees         Employee[]
@@ -593,6 +599,7 @@ model MenuItem {
   costPrice       Decimal?     @db.Decimal(10, 2)
   taxCategoryId   String?
   itemType        MenuItemType @default(FOOD)
+  size            ItemSize?
   isActive        Boolean      @default(true)
   isFeatured      Boolean      @default(false)
   availableOnline Boolean      @default(true)
@@ -607,12 +614,30 @@ model MenuItem {
   category       MenuCategory            @relation(fields: [categoryId], references: [id])
   taxCategory    TaxCategory?            @relation(fields: [taxCategoryId], references: [id])
   modifierGroups MenuItemModifierGroup[]
-  recipe         Recipe?
+  variants       MenuItemVariant[]
+  recipes        Recipe[]                // one per variant, or one base recipe if no variants
   branchPrices   BranchMenuPrice[]
   posOrderItems  PosOrderItem[]
   comboItems     ComboItem[]
 
   @@map("menu_items")
+}
+
+model MenuItemVariant {
+  id          String   @id @default(cuid())
+  menuItemId  String
+  name        String   // "Small", "Large", "Regular"
+  price       Decimal  @db.Decimal(10, 2)
+  sku         String?
+  sortOrder   Int      @default(0)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  menuItem    MenuItem  @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  recipe      Recipe?
+
+  @@map("menu_item_variants")
 }
 
 model BranchMenuPrice {
@@ -853,6 +878,8 @@ model PosOrderItem {
   id             String     @id @default(cuid())
   orderId        String
   menuItemId     String
+  variantId      String?    // which variant was ordered (null = no variants)
+  variantName    String?    // snapshot: "Small", "Large"
   // Price snapshot at time of sale
   itemName       String
   itemSku        String?
@@ -990,8 +1017,11 @@ model StockItem {
   categoryId      String?
   name            String
   sku             String?
-  unit            String // kg, g, ml, L, pcs, bag, box
-  unitCost        Decimal? @db.Decimal(10, 4)
+  unit            String // kg, g, ml, L, pcs — recipe unit
+  packSize        Decimal? @db.Decimal(10, 3) // how many units per pack (e.g. 1000 ml per carton)
+  packUnit        String?  // what you buy: carton, bag, bottle, box, pack
+  purchasePrice   Decimal? @db.Decimal(10, 2) // price per pack
+  unitCost        Decimal? @db.Decimal(10, 4) // auto-computed: purchasePrice / packSize
   minStockLevel   Decimal? @db.Decimal(10, 3)
   maxStockLevel   Decimal? @db.Decimal(10, 3)
   reorderPoint    Decimal? @db.Decimal(10, 3)
@@ -1008,6 +1038,7 @@ model StockItem {
   modifiers          Modifier[]
   poLines            PurchaseOrderLine[]
   grnLines           GrnLine[]
+  packagingRules     PackagingRule[]
 
   @@map("stock_items")
 }
@@ -1063,15 +1094,18 @@ model StockMovement {
 
 model Recipe {
   id          String   @id @default(cuid())
-  menuItemId  String   @unique
+  menuItemId  String
+  variantId   String?  @unique // if set, recipe belongs to a specific variant
   servingSize Int      @default(1)
   notes       String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   menuItem    MenuItem           @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  variant     MenuItemVariant?   @relation(fields: [variantId], references: [id], onDelete: Cascade)
   ingredients RecipeIngredient[]
 
+  @@unique([menuItemId, variantId])
   @@map("recipes")
 }
 
@@ -1087,6 +1121,24 @@ model RecipeIngredient {
   stockItem StockItem @relation(fields: [stockItemId], references: [id])
 
   @@map("recipe_ingredients")
+}
+
+model PackagingRule {
+  id          String  @id @default(cuid())
+  tenantId    String
+  stockItemId String
+  orderType   String  // TAKEAWAY, DELIVERY, ANY
+  itemType    String  // BEVERAGE, FOOD, ANY
+  sizeTag     String? // SMALL, LARGE, ANY (null = any)
+  scope       String  @default("PER_ITEM") // PER_ITEM or PER_ORDER
+  quantity    Int     @default(1)
+  isActive    Boolean @default(true)
+  createdAt   DateTime @default(now())
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  stockItem StockItem @relation(fields: [stockItemId], references: [id])
+
+  @@map("packaging_rules")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

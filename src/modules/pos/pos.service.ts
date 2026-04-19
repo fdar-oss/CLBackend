@@ -30,46 +30,74 @@ export class PosService {
     const shift = await this.prisma.posShift.findUnique({
       where: { id: shiftId },
       include: {
-        posOrders: {
-          where: { status: 'COMPLETED' },
-          include: { payments: true },
-        },
+        posOrders: { include: { payments: true, orderItems: true } },
         cashMovements: true,
+        openedBy: { select: { fullName: true } },
+        branch: { select: { name: true } },
       },
     });
     if (!shift) throw new NotFoundException('Shift not found');
     if (shift.status === 'CLOSED') throw new BadRequestException('Shift already closed');
 
-    // Calculate X/Z report data
-    const totalSales = shift.posOrders.reduce(
-      (sum, o) => sum + Number(o.total), 0,
-    );
-    const totalOrders = shift.posOrders.length;
-    const cashIn = shift.cashMovements
-      .filter(m => m.type === 'CASH_IN')
-      .reduce((s, m) => s + Number(m.amount), 0);
-    const cashOut = shift.cashMovements
-      .filter(m => m.type === 'CASH_OUT' || m.type === 'PETTY_CASH')
-      .reduce((s, m) => s + Number(m.amount), 0);
+    const completedOrders = shift.posOrders.filter(o => o.status === 'COMPLETED');
+    const cancelledOrders = shift.posOrders.filter(o => o.status === 'CANCELLED');
+    const refundedOrders = shift.posOrders.filter(o => o.status === 'REFUNDED');
 
-    const cashOrders = shift.posOrders.flatMap(o => o.payments)
-      .filter(p => p.method === 'CASH' && p.status === 'COMPLETED')
-      .reduce((s, p) => s + Number(p.amount), 0);
+    const totalSales = completedOrders.reduce((s, o) => s + Number(o.total), 0);
+    const totalSubtotal = completedOrders.reduce((s, o) => s + Number(o.subtotal), 0);
+    const totalTax = completedOrders.reduce((s, o) => s + Number(o.taxAmount), 0);
+    const totalOrders = completedOrders.length;
 
-    const expectedCash = Number(shift.openingFloat) + cashOrders + cashIn - cashOut;
+    const cashIn = shift.cashMovements.filter(m => m.type === 'CASH_IN').reduce((s, m) => s + Number(m.amount), 0);
+    const cashOut = shift.cashMovements.filter(m => m.type === 'CASH_OUT' || m.type === 'PETTY_CASH').reduce((s, m) => s + Number(m.amount), 0);
+
+    const allPayments = completedOrders.flatMap(o => o.payments).filter(p => p.status === 'COMPLETED');
+    const cashSales = allPayments.filter(p => p.method === 'CASH').reduce((s, p) => s + Number(p.amount), 0);
+    const cardSales = allPayments.filter(p => p.method === 'CARD').reduce((s, p) => s + Number(p.amount), 0);
+    const bankSales = allPayments.filter(p => p.method === 'BANK_TRANSFER').reduce((s, p) => s + Number(p.amount), 0);
+
+    const expectedCash = Number(shift.openingFloat) + cashSales + cashIn - cashOut;
     const cashVariance = closingCash - expectedCash;
 
+    // Top items sold
+    const itemMap: Record<string, { name: string; qty: number; revenue: number }> = {};
+    for (const order of completedOrders) {
+      for (const item of order.orderItems) {
+        if (!itemMap[item.itemName]) itemMap[item.itemName] = { name: item.itemName, qty: 0, revenue: 0 };
+        itemMap[item.itemName].qty += item.quantity;
+        itemMap[item.itemName].revenue += Number(item.lineTotal);
+      }
+    }
+    const topItems = Object.values(itemMap).sort((a, b) => b.qty - a.qty).slice(0, 15);
+
+    // Order type breakdown
+    const dineIn = completedOrders.filter(o => o.orderType === 'DINE_IN').length;
+    const takeaway = completedOrders.filter(o => o.orderType === 'TAKEAWAY').length;
+    const delivery = completedOrders.filter(o => o.orderType === 'DELIVERY').length;
+
     const reportData = {
-      branchId: shift.branchId,
+      branchName: shift.branch.name,
+      openedBy: shift.openedBy.fullName,
       openedAt: shift.openedAt,
       closedAt: new Date(),
-      openingFloat: shift.openingFloat,
+      openingFloat: Number(shift.openingFloat),
       closingCash,
       expectedCash,
       cashVariance,
       totalOrders,
       totalSales,
-      byPaymentMethod: this.summarizeByPaymentMethod(shift.posOrders),
+      totalSubtotal,
+      totalTax,
+      cashSales,
+      cardSales,
+      bankSales,
+      cashIn,
+      cashOut,
+      voidedOrders: cancelledOrders.length,
+      refundedOrders: refundedOrders.length,
+      avgOrderValue: totalOrders > 0 ? totalSales / totalOrders : 0,
+      orderTypes: { dineIn, takeaway, delivery },
+      topItems,
     };
 
     const closed = await this.prisma.posShift.update({
@@ -86,21 +114,33 @@ export class PosService {
         notes,
         zReportData: reportData,
       },
+      include: { openedBy: { select: { fullName: true } }, branch: { select: { name: true } } },
     });
 
-    // Trigger daily summary computation in FinanceService
     this.eventEmitter.emit('shift.closed', {
       branchId: shift.branchId,
       date: new Date().toISOString(),
     });
 
-    return closed;
+    return { ...closed, zReport: reportData };
   }
 
   async getActiveShift(branchId: string) {
     return this.prisma.posShift.findFirst({
       where: { branchId, status: 'OPEN' },
       include: { openedBy: { select: { id: true, fullName: true } } },
+    });
+  }
+
+  async getClosedShifts(branchId: string, limit = 50) {
+    return this.prisma.posShift.findMany({
+      where: { branchId, status: 'CLOSED' },
+      include: {
+        openedBy: { select: { fullName: true } },
+        closedBy: { select: { fullName: true } },
+      },
+      orderBy: { closedAt: 'desc' },
+      take: limit,
     });
   }
 
@@ -121,7 +161,12 @@ export class PosService {
     const orderNumber = `ORD-${new Date().getFullYear()}-${String(count + 1).padStart(5, '0')}`;
 
     // Calculate totals
-    const { items, tableId, customerId, orderType, notes, source, paymentMethod } = data;
+    const { items, tableId, customerId, orderType, notes, source, paymentMethod, servedById, discount } = data;
+
+    // DINE_IN must have a table
+    if ((orderType || 'DINE_IN') === 'DINE_IN' && !tableId) {
+      throw new BadRequestException('Dine-in orders require a table');
+    }
 
     // Payment-method-based tax: CASH = 16%, card/digital = 5%
     const CASH_TAX = 16;
@@ -133,11 +178,18 @@ export class PosService {
       items.map(async (item: any) => {
         const menuItem = await this.prisma.menuItem.findUnique({
           where: { id: item.menuItemId },
-          include: { branchPrices: { where: { branchId } } },
+          include: { branchPrices: { where: { branchId } }, variants: true },
         });
         if (!menuItem) throw new NotFoundException(`Menu item ${item.menuItemId} not found`);
 
-        const price = Number(menuItem.branchPrices[0]?.price ?? menuItem.basePrice);
+        // Use variant price if a variant was selected, otherwise base/branch price
+        let price: number;
+        if (item.variantId) {
+          const variant = menuItem.variants.find((v: any) => v.id === item.variantId);
+          price = variant ? Number(variant.price) : Number(menuItem.basePrice);
+        } else {
+          price = Number(menuItem.branchPrices[0]?.price ?? menuItem.basePrice);
+        }
         const modifiersTotal = (item.modifiers || []).reduce(
           (s: number, m: any) => s + Number(m.priceAdjustment || 0), 0,
         );
@@ -146,9 +198,12 @@ export class PosService {
         const taxAmount = (unitPrice * item.quantity * effectiveTaxRate) / 100;
         const lineTotal = unitPrice * item.quantity + taxAmount;
 
+        const variantLabel = item.variantName ? ` (${item.variantName})` : '';
         return {
           menuItemId: item.menuItemId,
-          itemName: menuItem.name,
+          variantId: item.variantId || null,
+          variantName: item.variantName || null,
+          itemName: `${menuItem.name}${variantLabel}`,
           itemSku: menuItem.sku,
           unitPrice,
           quantity: item.quantity,
@@ -165,9 +220,22 @@ export class PosService {
       }),
     );
 
-    const subtotal = orderItems.reduce((s, i) => s + i.unitPrice * i.quantity, 0);
-    const taxAmount = orderItems.reduce((s, i) => s + i.taxAmount, 0);
-    const total = orderItems.reduce((s, i) => s + i.lineTotal, 0);
+    const rawSubtotal = orderItems.reduce((s, i) => s + i.unitPrice * i.quantity, 0);
+
+    // Apply discount
+    let discountAmount = 0;
+    let discountNotes = '';
+    if (discount) {
+      discountAmount = discount.type === 'PERCENT'
+        ? (rawSubtotal * discount.value) / 100
+        : discount.value;
+      discountAmount = Math.min(discountAmount, rawSubtotal);
+      discountNotes = `${discount.type === 'PERCENT' ? `${discount.value}%` : `₨${discount.value}`} — ${discount.reason}`;
+    }
+
+    const subtotal = rawSubtotal - discountAmount;
+    const taxAmount = Math.round((subtotal * effectiveTaxRate) / 100);
+    const total = Math.round(subtotal + taxAmount);
 
     const order = await this.prisma.posOrder.create({
       data: {
@@ -176,14 +244,16 @@ export class PosService {
         tableId,
         customerId,
         createdById: userId,
+        servedById: servedById || userId,
         orderNumber,
         orderType: orderType || 'DINE_IN',
         status: 'PENDING',
         source: source || 'POS',
-        subtotal,
+        subtotal: rawSubtotal,
+        discountAmount,
         taxAmount,
         total,
-        notes,
+        notes: discountNotes ? `${notes || ''}${notes ? ' | ' : ''}Discount: ${discountNotes}` : notes,
         orderItems: {
           create: orderItems.map(({ modifiers, ...item }) => ({
             ...item,
@@ -215,7 +285,9 @@ export class PosService {
   }
 
   async getOrders(tenantId: string, branchId: string, filters: any = {}) {
-    const { status, orderType, date, page = 1, limit = 50 } = filters;
+    const { status, orderType, date } = filters;
+    const page = Math.max(1, parseInt(filters.page, 10) || 1);
+    const limit = Math.min(100, parseInt(filters.limit, 10) || 50);
     const skip = (page - 1) * limit;
 
     return this.prisma.posOrder.findMany({
@@ -248,7 +320,7 @@ export class PosService {
     const order = await this.prisma.posOrder.findFirst({
       where: { id, tenantId },
       include: {
-        orderItems: { include: { modifiers: true, menuItem: { select: { name: true, image: true } } } },
+        orderItems: { include: { modifiers: true, menuItem: { select: { name: true, image: true, itemType: true } } } },
         payments: true,
         refunds: true,
         kitchenTickets: true,
@@ -288,8 +360,85 @@ export class PosService {
 
   // ─── Payments ────────────────────────────────────────────────────────────────
 
-  async processPayment(tenantId: string, orderId: string, payments: any[]) {
-    const order = await this.getOrder(tenantId, orderId);
+  async processPayment(
+    tenantId: string,
+    orderId: string,
+    payments: any[],
+    customerLeft = true,
+    paymentMethod?: string,
+    customerInfo?: { fullName?: string; phone?: string; email?: string; optInEmail?: boolean },
+  ) {
+    let order = await this.getOrder(tenantId, orderId);
+
+    // Capture customer at payment for marketing — upsert by phone if provided
+    if (customerInfo && (customerInfo.phone || customerInfo.email) && customerInfo.fullName) {
+      let customer: any = null;
+      if (customerInfo.phone) {
+        customer = await this.prisma.customer.findFirst({
+          where: { tenantId, phone: customerInfo.phone },
+        });
+      }
+      if (!customer && customerInfo.email) {
+        customer = await this.prisma.customer.findFirst({
+          where: { tenantId, email: customerInfo.email },
+        });
+      }
+      if (customer) {
+        customer = await this.prisma.customer.update({
+          where: { id: customer.id },
+          data: {
+            fullName: customerInfo.fullName,
+            email: customerInfo.email || customer.email,
+            phone: customerInfo.phone || customer.phone,
+            optInEmail: customerInfo.optInEmail ?? customer.optInEmail,
+          },
+        });
+      } else {
+        customer = await this.prisma.customer.create({
+          data: {
+            tenantId,
+            fullName: customerInfo.fullName,
+            email: customerInfo.email,
+            phone: customerInfo.phone,
+            optInEmail: !!customerInfo.optInEmail,
+            source: 'WALK_IN',
+          },
+        });
+      }
+      await this.prisma.posOrder.update({
+        where: { id: orderId },
+        data: { customerId: customer.id },
+      });
+      order = await this.getOrder(tenantId, orderId);
+    }
+
+    // Recalculate tax based on the actual payment method picked at checkout
+    // (the order may have been created earlier with a default rate)
+    if (paymentMethod) {
+      const newRate = paymentMethod === 'CASH' ? 16 : 5;
+      const currentRate = Number(order.orderItems?.[0]?.taxRate ?? 0);
+      if (Math.abs(currentRate - newRate) > 0.01) {
+        await this.prisma.$transaction(async (tx) => {
+          let newSubtotal = 0;
+          let newTax = 0;
+          for (const item of order.orderItems) {
+            const lineSub = Number(item.unitPrice) * item.quantity;
+            const lineTax = (lineSub * newRate) / 100;
+            newSubtotal += lineSub;
+            newTax += lineTax;
+            await tx.posOrderItem.update({
+              where: { id: item.id },
+              data: { taxRate: newRate, taxAmount: lineTax, lineTotal: lineSub + lineTax },
+            });
+          }
+          await tx.posOrder.update({
+            where: { id: orderId },
+            data: { subtotal: newSubtotal, taxAmount: newTax, total: newSubtotal + newTax },
+          });
+        });
+        order = await this.getOrder(tenantId, orderId);
+      }
+    }
 
     const totalPaid = payments.reduce((s, p) => s + Number(p.amount), 0);
     if (totalPaid < Number(order.total)) {
@@ -299,7 +448,6 @@ export class PosService {
     }
 
     await this.prisma.$transaction(async (tx) => {
-      // Insert all payment rows
       await tx.posPayment.createMany({
         data: payments.map(p => ({
           orderId,
@@ -310,21 +458,19 @@ export class PosService {
         })),
       });
 
-      // Mark order completed
       await tx.posOrder.update({
         where: { id: orderId },
         data: { status: 'COMPLETED', completedAt: new Date() },
       });
 
-      // Free table
-      if (order.tableId) {
+      // Free the table only if customer has left
+      if (order.tableId && customerLeft) {
         await tx.restaurantTable.update({
           where: { id: order.tableId },
           data: { status: 'AVAILABLE' },
         });
       }
 
-      // Award loyalty points if customer
       if (order.customerId) {
         await this.awardLoyaltyPoints(tx, tenantId, order.customerId, Number(order.total), orderId);
       }
@@ -383,6 +529,36 @@ export class PosService {
     return this.prisma.restaurantTable.updateMany({
       where: { id: tableId, branchId },
       data: { status: status as any },
+    });
+  }
+
+  // ─── KDS / Bar ───────────────────────────────────────────────────────────────
+
+  async getKdsTickets(branchId: string, stationType?: string) {
+    return this.prisma.kitchenTicket.findMany({
+      where: {
+        order: { branchId },
+        status: { in: ['PENDING', 'IN_PROGRESS', 'READY'] },
+        ...(stationType && { station: { type: stationType as any } }),
+      },
+      include: {
+        station: true,
+        order: { select: { orderNumber: true, orderType: true, table: true, createdAt: true } },
+      },
+      orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
+    });
+  }
+
+  async bumpTicket(ticketId: string, status: string) {
+    return this.prisma.kitchenTicket.update({
+      where: { id: ticketId },
+      data: {
+        status: status as any,
+        ...(status === 'IN_PROGRESS' && { startedAt: new Date() }),
+        ...(status === 'READY' && { completedAt: new Date() }),
+        ...(status === 'BUMPED' && { bumpedAt: new Date() }),
+      },
+      include: { station: true, order: { select: { orderNumber: true, orderType: true, table: true } } },
     });
   }
 

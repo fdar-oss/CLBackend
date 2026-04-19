@@ -2,6 +2,20 @@ import { Injectable, NotFoundException, BadRequestException, Logger } from '@nes
 import { PrismaService } from '../../prisma/prisma.service';
 import { OnEvent } from '@nestjs/event-emitter';
 
+// ─── Unit conversion ────────────────────────────────────────────────────────
+const TO_BASE: Record<string, { family: string; factor: number }> = {
+  g: { family: 'w', factor: 1 }, kg: { family: 'w', factor: 1000 }, mg: { family: 'w', factor: 0.001 },
+  lb: { family: 'w', factor: 453.592 }, oz: { family: 'w', factor: 28.3495 },
+  ml: { family: 'v', factor: 1 }, L: { family: 'v', factor: 1000 }, cl: { family: 'v', factor: 10 },
+  pcs: { family: 'c', factor: 1 }, dozen: { family: 'c', factor: 12 },
+};
+function convertUnit(qty: number, from: string, to: string): number {
+  if (from === to) return qty;
+  const f = TO_BASE[from], t = TO_BASE[to];
+  if (!f || !t || f.family !== t.family) return qty; // fallback: no conversion
+  return (qty * f.factor) / t.factor;
+}
+
 @Injectable()
 export class InventoryService {
   private readonly logger = new Logger(InventoryService.name);
@@ -120,18 +134,29 @@ export class InventoryService {
   // ─── Recipes ─────────────────────────────────────────────────────────────────
 
   async upsertRecipe(menuItemId: string, data: any) {
-    const { ingredients, ...recipeData } = data;
-    return this.prisma.recipe.upsert({
-      where: { menuItemId },
-      update: {
-        ...recipeData,
-        ingredients: {
-          deleteMany: {},
-          create: ingredients,
+    const { ingredients, variantId, ...recipeData } = data;
+    const vId = variantId || null;
+
+    // Find existing recipe
+    const existing = await this.prisma.recipe.findFirst({
+      where: { menuItemId, variantId: vId },
+    });
+
+    if (existing) {
+      return this.prisma.recipe.update({
+        where: { id: existing.id },
+        data: {
+          ...recipeData,
+          ingredients: { deleteMany: {}, create: ingredients },
         },
-      },
-      create: {
+        include: { ingredients: { include: { stockItem: true } } },
+      });
+    }
+
+    return this.prisma.recipe.create({
+      data: {
         menuItemId,
+        variantId: vId,
         ...recipeData,
         ingredients: { create: ingredients },
       },
@@ -139,10 +164,17 @@ export class InventoryService {
     });
   }
 
-  async getRecipe(menuItemId: string) {
-    return this.prisma.recipe.findUnique({
-      where: { menuItemId },
+  async getRecipe(menuItemId: string, variantId?: string) {
+    return this.prisma.recipe.findFirst({
+      where: { menuItemId, variantId: variantId || null },
       include: { ingredients: { include: { stockItem: true } } },
+    });
+  }
+
+  async getRecipesForItem(menuItemId: string) {
+    return this.prisma.recipe.findMany({
+      where: { menuItemId },
+      include: { ingredients: { include: { stockItem: true } }, variant: true },
     });
   }
 
@@ -154,7 +186,7 @@ export class InventoryService {
       const order = await this.prisma.posOrder.findUnique({
         where: { id: payload.orderId },
         include: {
-          orderItems: true,
+          orderItems: { include: { menuItem: { select: { itemType: true, name: true } } } },
           branch: { include: { stockLocations: { where: { isDefault: true }, take: 1 } } },
         },
       });
@@ -163,15 +195,29 @@ export class InventoryService {
       const defaultLocation = order.branch.stockLocations[0];
       if (!defaultLocation) return;
 
+      const isTakeaway = order.orderType === 'TAKEAWAY' || order.orderType === 'DELIVERY';
+
+      // ── Recipe-based deductions ──
       for (const item of order.orderItems) {
-        const recipe = await this.prisma.recipe.findUnique({
-          where: { menuItemId: item.menuItemId },
+        // Look up recipe: variant-specific first, then base recipe
+        let recipe = await this.prisma.recipe.findFirst({
+          where: { menuItemId: item.menuItemId, variantId: item.variantId || null },
           include: { ingredients: true },
         });
+        if (!recipe && item.variantId) {
+          // Fallback to base recipe if no variant-specific one
+          recipe = await this.prisma.recipe.findFirst({
+            where: { menuItemId: item.menuItemId, variantId: null },
+            include: { ingredients: true },
+          });
+        }
         if (!recipe) continue;
 
         for (const ing of recipe.ingredients) {
-          const deductQty = Number(ing.quantity) * Number(ing.wasteFactor) * item.quantity * -1;
+          // Convert recipe unit to stock unit (e.g. 10g → 0.01kg)
+          const stockItem = await this.prisma.stockItem.findUnique({ where: { id: ing.stockItemId }, select: { unit: true } });
+          const convertedQty = convertUnit(Number(ing.quantity), ing.unit, stockItem?.unit || ing.unit);
+          const deductQty = convertedQty * Number(ing.wasteFactor) * item.quantity * -1;
           await this.recordMovement({
             stockItemId: ing.stockItemId,
             locationId: defaultLocation.id,
@@ -184,8 +230,69 @@ export class InventoryService {
           });
         }
       }
+
+      // ── Packaging auto-deduction (takeaway/delivery only, config-driven) ──
+      if (isTakeaway) {
+        await this.deductPackaging(order, defaultLocation.id);
+      }
     } catch (err) {
       this.logger.error(`Stock deduction error for order ${payload.orderId}`, err);
+    }
+  }
+
+  private async deductPackaging(order: any, locationId: string) {
+    // Load packaging rules for this tenant — if none exist, nothing happens
+    const rules = await this.prisma.packagingRule.findMany({
+      where: { tenantId: order.tenantId, isActive: true },
+    });
+    if (rules.length === 0) return;
+
+    const orderTypes = [order.orderType, 'ANY'];
+    let hasFood = false;
+
+    for (const item of order.orderItems) {
+      const itemType = item.menuItem?.itemType || 'FOOD';
+      const itemName = (item.itemName || '').toLowerCase();
+      const sizeTag = itemName.includes('(large)') ? 'LARGE' : 'SMALL';
+
+      if (itemType === 'FOOD') hasFood = true;
+
+      // Find matching per-item rules
+      const matching = rules.filter(r =>
+        r.scope === 'PER_ITEM' &&
+        orderTypes.includes(r.orderType) &&
+        (r.itemType === itemType || r.itemType === 'ANY') &&
+        (r.sizeTag === sizeTag || r.sizeTag === 'ANY' || !r.sizeTag)
+      );
+
+      for (const rule of matching) {
+        await this.recordMovement({
+          stockItemId: rule.stockItemId,
+          locationId,
+          type: 'SALE_DEDUCTION',
+          quantity: rule.quantity * item.quantity * -1,
+          reference: order.id,
+          referenceType: 'PACKAGING',
+        }).catch(err => this.logger.warn(`Packaging deduction failed: ${err.message}`));
+      }
+    }
+
+    // Per-order rules (e.g. 1 carry bag per order)
+    const perOrderRules = rules.filter(r =>
+      r.scope === 'PER_ORDER' &&
+      orderTypes.includes(r.orderType) &&
+      (r.itemType === 'ANY' || (r.itemType === 'FOOD' && hasFood))
+    );
+
+    for (const rule of perOrderRules) {
+      await this.recordMovement({
+        stockItemId: rule.stockItemId,
+        locationId,
+        type: 'SALE_DEDUCTION',
+        quantity: rule.quantity * -1,
+        reference: order.id,
+        referenceType: 'PACKAGING',
+      }).catch(err => this.logger.warn(`Packaging deduction failed: ${err.message}`));
     }
   }
 
@@ -231,5 +338,91 @@ export class InventoryService {
 
   async createLocation(branchId: string, data: any) {
     return this.prisma.stockLocation.create({ data: { branchId, ...data } });
+  }
+
+  // ─── Cost Analysis ──────────────────────────────────────────────────────────
+
+  async getCostAnalysis(tenantId: string) {
+    const items = await this.prisma.menuItem.findMany({
+      where: { tenantId, isActive: true },
+      include: {
+        category: { select: { name: true } },
+        variants: { where: { isActive: true }, orderBy: { sortOrder: 'asc' } },
+        recipes: {
+          include: { ingredients: { include: { stockItem: { select: { name: true, unit: true, unitCost: true } } } } },
+        },
+      },
+      orderBy: { name: 'asc' },
+    });
+
+    const results: any[] = [];
+
+    for (const item of items) {
+      if (item.variants.length > 0) {
+        // Per-variant rows
+        for (const v of item.variants) {
+          const recipe = item.recipes.find(r => r.variantId === v.id);
+          const recipeCost = recipe
+            ? recipe.ingredients.reduce((sum, ing) => {
+                return sum + convertUnit(Number(ing.quantity), ing.unit, ing.stockItem.unit) * Number(ing.wasteFactor) * Number(ing.stockItem.unitCost ?? 0);
+              }, 0)
+            : null;
+          const price = Number(v.price);
+          const margin = recipeCost !== null && price > 0 ? ((price - recipeCost) / price) * 100 : null;
+          results.push({
+            id: item.id, variantId: v.id,
+            name: `${item.name} (${v.name})`,
+            category: item.category?.name, itemType: item.itemType,
+            sellingPrice: price, recipeCost,
+            profit: recipeCost !== null ? price - recipeCost : null,
+            margin, hasRecipe: !!recipe,
+            ingredientCount: recipe?.ingredients.length ?? 0,
+          });
+        }
+      } else {
+        // No variants — base recipe
+        const recipe = item.recipes.find(r => !r.variantId);
+        const recipeCost = recipe
+          ? recipe.ingredients.reduce((sum, ing) => {
+              return sum + convertUnit(Number(ing.quantity), ing.unit, ing.stockItem.unit) * Number(ing.wasteFactor) * Number(ing.stockItem.unitCost ?? 0);
+            }, 0)
+          : null;
+        const price = Number(item.basePrice);
+        const margin = recipeCost !== null && price > 0 ? ((price - recipeCost) / price) * 100 : null;
+        results.push({
+          id: item.id, variantId: null,
+          name: item.name,
+          category: item.category?.name, itemType: item.itemType,
+          sellingPrice: price, recipeCost,
+          profit: recipeCost !== null ? price - recipeCost : null,
+          margin, hasRecipe: !!recipe,
+          ingredientCount: recipe?.ingredients.length ?? 0,
+        });
+      }
+    }
+
+    return results;
+  }
+
+  // ─── Packaging Rules ────────────────────────────────────────────────────────
+
+  async getPackagingRules(tenantId: string) {
+    return this.prisma.packagingRule.findMany({
+      where: { tenantId },
+      include: { stockItem: { select: { id: true, name: true, unit: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
+
+  async createPackagingRule(tenantId: string, data: any) {
+    return this.prisma.packagingRule.create({
+      data: { tenantId, ...data },
+      include: { stockItem: { select: { id: true, name: true, unit: true } } },
+    });
+  }
+
+  async deletePackagingRule(id: string) {
+    await this.prisma.packagingRule.delete({ where: { id } });
+    return { deleted: true };
   }
 }

@@ -28,7 +28,15 @@ export class MenuService {
   async deleteCategory(tenantId: string, id: string) {
     const cat = await this.prisma.menuCategory.findFirst({ where: { id, tenantId } });
     if (!cat) throw new NotFoundException('Category not found');
-    return this.prisma.menuCategory.update({ where: { id }, data: { isActive: false } });
+
+    const itemCount = await this.prisma.menuItem.count({ where: { categoryId: id } });
+    if (itemCount > 0) {
+      await this.prisma.menuCategory.update({ where: { id }, data: { isActive: false } });
+      return { deleted: false, deactivated: true, reason: `Category has ${itemCount} items — deactivated instead` };
+    }
+
+    await this.prisma.menuCategory.delete({ where: { id } });
+    return { deleted: true };
   }
 
   // ─── Items ──────────────────────────────────────────────────────────────────
@@ -51,8 +59,9 @@ export class MenuService {
       include: {
         category: true,
         taxCategory: true,
+        variants: { orderBy: { sortOrder: 'asc' } },
         modifierGroups: { include: { modifierGroup: { include: { modifiers: true } } } },
-        recipe: { include: { ingredients: { include: { stockItem: true } } } },
+        recipes: { include: { ingredients: { include: { stockItem: true } } } },
       },
     });
   }
@@ -63,6 +72,7 @@ export class MenuService {
       include: {
         category: { select: { id: true, name: true } },
         taxCategory: { select: { id: true, name: true, rate: true } },
+        variants: { where: { isActive: true }, orderBy: { sortOrder: 'asc' } },
         modifierGroups: {
           orderBy: { sortOrder: 'asc' },
           include: {
@@ -97,10 +107,11 @@ export class MenuService {
       include: {
         category: true,
         taxCategory: true,
+        variants: { orderBy: { sortOrder: 'asc' } },
         modifierGroups: {
           include: { modifierGroup: { include: { modifiers: true } } },
         },
-        recipe: { include: { ingredients: { include: { stockItem: true } } } },
+        recipes: { include: { ingredients: { include: { stockItem: true } } } },
         branchPrices: true,
       },
     });
@@ -110,13 +121,129 @@ export class MenuService {
 
   async updateItem(tenantId: string, id: string, data: any) {
     await this.getItem(tenantId, id);
-    const { modifierGroupIds, ...itemData } = data;
-    return this.prisma.menuItem.update({ where: { id }, data: itemData });
+    const {
+      modifierGroupIds,
+      branchPrices, effectivePrice,
+      category, taxCategory, modifierGroups, recipe,
+      id: _id, tenantId: _t, createdAt, updatedAt,
+      categoryId, taxCategoryId,
+      ...itemData
+    } = data;
+
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.menuItem.update({
+        where: { id },
+        data: {
+          ...itemData,
+          ...(categoryId !== undefined && { categoryId: categoryId || null }),
+          ...(taxCategoryId !== undefined && { taxCategoryId: taxCategoryId || null }),
+        },
+      });
+
+      // Replace linked modifier groups if explicitly provided (array, even if empty)
+      if (Array.isArray(modifierGroupIds)) {
+        await tx.menuItemModifierGroup.deleteMany({ where: { menuItemId: id } });
+        if (modifierGroupIds.length > 0) {
+          await tx.menuItemModifierGroup.createMany({
+            data: modifierGroupIds.map((mgId: string, i: number) => ({
+              menuItemId: id,
+              modifierGroupId: mgId,
+              sortOrder: i,
+            })),
+          });
+        }
+      }
+
+      return updated;
+    });
+  }
+
+  async toggleItem(tenantId: string, id: string) {
+    const item = await this.getItem(tenantId, id);
+    return this.prisma.menuItem.update({
+      where: { id },
+      data: { isActive: !item.isActive },
+    });
   }
 
   async deleteItem(tenantId: string, id: string) {
     await this.getItem(tenantId, id);
-    return this.prisma.menuItem.update({ where: { id }, data: { isActive: false } });
+
+    // Check if the item has any order history
+    const orderCount = await this.prisma.posOrderItem.count({ where: { menuItemId: id } });
+
+    if (orderCount > 0) {
+      // Item has sales history — can't hard-delete, soft-delete instead
+      await this.prisma.menuItem.update({ where: { id }, data: { isActive: false } });
+      return { deleted: false, deactivated: true, reason: 'Item has order history — deactivated instead of deleted' };
+    }
+
+    // No order history — safe to permanently remove
+    await this.prisma.$transaction(async (tx) => {
+      await tx.menuItemModifierGroup.deleteMany({ where: { menuItemId: id } });
+      await tx.branchMenuPrice.deleteMany({ where: { menuItemId: id } });
+      const recipeIds = (await tx.recipe.findMany({ where: { menuItemId: id }, select: { id: true } })).map(r => r.id);
+      if (recipeIds.length) await tx.recipeIngredient.deleteMany({ where: { recipeId: { in: recipeIds } } });
+      await tx.recipe.deleteMany({ where: { menuItemId: id } });
+      await tx.menuItemVariant.deleteMany({ where: { menuItemId: id } });
+      await tx.menuItem.delete({ where: { id } });
+    });
+    return { deleted: true };
+  }
+
+  // ─── Variants ───────────────────────────────────────────────────────────────
+
+  async createVariant(menuItemId: string, data: any) {
+    return this.prisma.menuItemVariant.create({
+      data: { menuItemId, ...data },
+    });
+  }
+
+  async updateVariant(variantId: string, data: any) {
+    return this.prisma.menuItemVariant.update({
+      where: { id: variantId },
+      data,
+    });
+  }
+
+  async deleteVariant(variantId: string) {
+    // Delete variant's recipe first
+    await this.prisma.recipe.deleteMany({ where: { variantId } });
+    await this.prisma.menuItemVariant.delete({ where: { id: variantId } });
+    return { deleted: true };
+  }
+
+  async setVariants(menuItemId: string, variants: any[]) {
+    // Replace all variants for this item
+    await this.prisma.$transaction(async (tx) => {
+      // Delete old variant recipes
+      const oldVariants = await tx.menuItemVariant.findMany({ where: { menuItemId }, select: { id: true } });
+      const oldIds = oldVariants.map(v => v.id);
+      if (oldIds.length) {
+        const recipeIds = (await tx.recipe.findMany({ where: { variantId: { in: oldIds } }, select: { id: true } })).map(r => r.id);
+        if (recipeIds.length) await tx.recipeIngredient.deleteMany({ where: { recipeId: { in: recipeIds } } });
+        await tx.recipe.deleteMany({ where: { variantId: { in: oldIds } } });
+      }
+      await tx.menuItemVariant.deleteMany({ where: { menuItemId } });
+
+      // Create new variants
+      if (variants.length > 0) {
+        await tx.menuItemVariant.createMany({
+          data: variants.map((v, i) => ({
+            menuItemId,
+            name: v.name,
+            price: v.price,
+            sku: v.sku || null,
+            sortOrder: i,
+          })),
+        });
+      }
+    });
+
+    return this.prisma.menuItemVariant.findMany({
+      where: { menuItemId },
+      orderBy: { sortOrder: 'asc' },
+    });
   }
 
   // ─── Modifier Groups ────────────────────────────────────────────────────────
@@ -190,6 +317,7 @@ export class MenuService {
                 },
               },
             },
+            variants: { where: { isActive: true }, orderBy: { sortOrder: 'asc' } },
             branchPrices: { where: { branchId } },
           },
         },
