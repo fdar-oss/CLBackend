@@ -28,6 +28,34 @@ export class UsersController {
     return this.usersService.findAll(user.tenantId);
   }
 
+  // ─── Access Control (MUST be above :id routes) ──────────────────────────────
+
+  @Get('access-control')
+  @Roles(UserRole.TENANT_OWNER)
+  @ApiOperation({ summary: 'Get all role permissions' })
+  getAllPermissions(@CurrentUser() u: JwtPayload) {
+    return this.usersService.getAllPermissions(u.tenantId);
+  }
+
+  @Get('access-control/my')
+  @ApiOperation({ summary: 'Get current user permissions' })
+  getMyPermissions(@CurrentUser() u: JwtPayload) {
+    return this.usersService.getPermissions(u.tenantId, u.role as any);
+  }
+
+  @Patch('access-control/:role')
+  @Roles(UserRole.TENANT_OWNER)
+  @ApiOperation({ summary: 'Update permissions for a role' })
+  updatePermissions(
+    @CurrentUser() u: JwtPayload,
+    @Param('role') role: string,
+    @Body() body: { allowedRoutes: string[]; allowedFeatures: string[] },
+  ) {
+    return this.usersService.updatePermissions(u.tenantId, role as any, body.allowedRoutes, body.allowedFeatures);
+  }
+
+  // ─── User CRUD ──────────────────────────────────────────────────────────────
+
   @Get(':id')
   @ApiOperation({ summary: 'Get user by ID' })
   findOne(@CurrentUser() user: JwtPayload, @Param('id') id: string) {

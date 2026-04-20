@@ -146,15 +146,39 @@ export class AuthService {
   }
 
   async me(userId: string) {
-    return this.prisma.user.findUnique({
+    const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: {
         id: true, email: true, fullName: true, role: true, avatar: true,
         phone: true, createdAt: true,
+        tenantId: true,
         tenant: { select: { id: true, name: true, slug: true, logo: true, primaryColor: true } },
         branch: { select: { id: true, name: true, code: true } },
       },
     });
+    if (!user) return null;
+
+    // Attach permissions
+    const { UsersService } = await import('../users/users.service');
+    const allRoutes = UsersService.ALL_ROUTES;
+    const allFeatures = UsersService.ALL_FEATURES;
+
+    if (user.role === 'TENANT_OWNER') {
+      return { ...user, permissions: { allowedRoutes: allRoutes, allowedFeatures: allFeatures } };
+    }
+
+    const perm = await this.prisma.rolePermission.findUnique({
+      where: { tenantId_role: { tenantId: user.tenantId, role: user.role as any } },
+    });
+
+    const defaults = (UsersService as any).DEFAULTS?.[user.role] || { routes: [], features: [] };
+    return {
+      ...user,
+      permissions: {
+        allowedRoutes: perm?.allowedRoutes || defaults.routes,
+        allowedFeatures: perm?.allowedFeatures || defaults.features,
+      },
+    };
   }
 
   // ─── Helpers ────────────────────────────────────────────────────────────────

@@ -397,6 +397,7 @@ model Tenant {
   stockCategories   StockCategory[]
   stockItems        StockItem[]
   packagingRules    PackagingRule[]
+  rolePermissions   RolePermission[]
   vendors           Vendor[]
   customers         Customer[]
   employees         Employee[]
@@ -1121,6 +1122,21 @@ model RecipeIngredient {
   stockItem StockItem @relation(fields: [stockItemId], references: [id])
 
   @@map("recipe_ingredients")
+}
+
+model RolePermission {
+  id              String   @id @default(cuid())
+  tenantId        String
+  role            UserRole
+  allowedRoutes   String[] // ["/admin/dashboard", "/admin/orders", "/pos/terminal", ...]
+  allowedFeatures String[] // ["menu.delete", "orders.refund", "orders.void", "pos.discount", ...]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, role])
+  @@map("role_permissions")
 }
 
 model PackagingRule {

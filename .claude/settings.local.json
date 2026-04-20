@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s -X POST http://localhost:4000/v1/auth/login -H 'Content-Type: application/json' -d '{\"email\":\"admin@coffeelab.pk\",\"password\":\"Admin@1234\",\"deviceInfo\":\"web\"}')",
+      "Bash(node -e 'let d=\"\";process.stdin.on\\(\"data\",c=>d+=c\\);process.stdin.on\\(\"end\",\\(\\)=>{const r=JSON.parse\\(d\\);console.log\\(\"allRoutes:\",r.allRoutes?.length\\);console.log\\(\"allFeatures:\",r.allFeatures?.length\\);r.roles?.forEach\\(p=>console.log\\(\" \",p.role,\"→\",p.allowedRoutes.length,\"pages,\",p.allowedFeatures.length,\"features\"\\)\\)}\\)')"
+    ]
+  }
+}
