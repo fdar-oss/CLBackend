@@ -136,4 +136,70 @@ export class HrController {
   getLaborSummary(@CurrentUser() u: JwtPayload, @Query('from') from: string, @Query('to') to: string, @Query('branchId') branchId?: string) {
     return this.svc.getLaborSummary(u.tenantId, from, to, branchId || undefined);
   }
+
+  // ─── Attendance Extras ──────────────────────────────────────────────────────
+
+  @Patch('attendance/:id/forgive')
+  @Roles(UserRole.TENANT_OWNER)
+  @ApiOperation({ summary: 'Forgive late deduction (owner only)' })
+  forgiveLateness(@Param('id') id: string) {
+    return this.svc.forgiveLateness(id);
+  }
+
+  @Get('attendance/summary')
+  @ApiOperation({ summary: 'Monthly attendance summary for all employees' })
+  getAttendanceSummary(@CurrentUser() u: JwtPayload, @Query('month') month: string, @Query('year') year: string) {
+    return this.svc.getAttendanceSummary(u.tenantId, parseInt(month, 10), parseInt(year, 10));
+  }
+
+  // ─── Salary Advances ───────────────────────────────────────────────────────
+
+  @Post('advances')
+  @Roles(UserRole.TENANT_OWNER, UserRole.HR_MANAGER)
+  @ApiOperation({ summary: 'Record a salary advance' })
+  createAdvance(@CurrentUser() u: JwtPayload, @Body() body: any) {
+    return this.svc.createAdvance(u.tenantId, { ...body, givenById: u.sub });
+  }
+
+  @Get('advances')
+  @ApiOperation({ summary: 'List salary advances' })
+  getAdvances(@CurrentUser() u: JwtPayload, @Query() filters: any) {
+    return this.svc.getAdvances(u.tenantId, filters);
+  }
+
+  // ─── Holiday Calendar ──────────────────────────────────────────────────────
+
+  @Post('holidays')
+  @Roles(UserRole.TENANT_OWNER, UserRole.HR_MANAGER)
+  @ApiOperation({ summary: 'Add a holiday (Eid, etc.)' })
+  createHoliday(@CurrentUser() u: JwtPayload, @Body() body: any) {
+    return this.svc.createHoliday(u.tenantId, body);
+  }
+
+  @Get('holidays')
+  @ApiOperation({ summary: 'List holidays' })
+  getHolidays(@CurrentUser() u: JwtPayload, @Query('year') year?: string) {
+    return this.svc.getHolidays(u.tenantId, year ? parseInt(year, 10) : undefined);
+  }
+
+  @Delete('holidays/:id')
+  @Roles(UserRole.TENANT_OWNER, UserRole.HR_MANAGER)
+  deleteHoliday(@Param('id') id: string) {
+    return this.svc.deleteHoliday(id);
+  }
+
+  // ─── Attendance Config ─────────────────────────────────────────────────────
+
+  @Get('attendance-config')
+  @Roles(UserRole.TENANT_OWNER)
+  getAttendanceConfig(@CurrentUser() u: JwtPayload) {
+    return this.svc.getAttendanceConfig(u.tenantId);
+  }
+
+  @Patch('attendance-config')
+  @Roles(UserRole.TENANT_OWNER)
+  @ApiOperation({ summary: 'Update WiFi IPs and grace period' })
+  updateAttendanceConfig(@CurrentUser() u: JwtPayload, @Body() body: any) {
+    return this.svc.updateAttendanceConfig(u.tenantId, body);
+  }
 }

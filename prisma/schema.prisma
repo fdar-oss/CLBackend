@@ -415,6 +415,8 @@ model Tenant {
   websitePages      WebsitePage[]
   careerPostings    CareerPosting[]
   auditLogs         AuditLog[]
+  holidays          HolidayCalendar[]
+  attendanceConfig  AttendanceConfig?
 
   @@map("tenants")
 }
@@ -1352,6 +1354,13 @@ model Employee {
   employmentType  EmploymentType @default(FULL_TIME)
   salaryType      SalaryType     @default(MONTHLY)
   baseSalary      Decimal        @db.Decimal(10, 2)
+  // Fixed schedule
+  scheduleStart   String?        // "09:00" — default daily start time
+  scheduleEnd     String?        // "18:00" — default daily end time
+  dailyHours      Decimal?       @db.Decimal(4, 1) // 9.0, 11.0, etc.
+  workingDaysPerMonth Int        @default(26)
+  paidOffDays     Int            @default(4) // paid days off per month
+  isClosingStaff  Boolean        @default(false) // no overtime for regular closing
   bankAccount     String?
   bankName        String?
   emergencyContact String?
@@ -1368,6 +1377,7 @@ model Employee {
   leaves       Leave[]
   payrollEntries PayrollEntry[]
   shifts       EmployeeShift[]
+  advances     SalaryAdvance[]
 
   @@unique([tenantId, employeeCode])
   @@map("employees")
@@ -1391,18 +1401,24 @@ model EmployeeShift {
 }
 
 model Attendance {
-  id          String           @id @default(cuid())
-  employeeId  String
-  branchId    String
-  date        DateTime         @db.Date
-  checkIn     DateTime?
-  checkOut    DateTime?
-  hoursWorked Decimal?         @db.Decimal(5, 2)
-  overtime    Decimal?         @db.Decimal(5, 2)
-  status      AttendanceStatus @default(PRESENT)
-  notes       String?
-  createdAt   DateTime         @default(now())
-  updatedAt   DateTime         @updatedAt
+  id            String           @id @default(cuid())
+  employeeId    String
+  branchId      String
+  date          DateTime         @db.Date
+  checkIn       DateTime?
+  checkOut      DateTime?
+  scheduledStart String?         // "09:00" — what time they should have started
+  scheduledEnd  String?          // "18:00"
+  hoursWorked   Decimal?         @db.Decimal(5, 2)
+  overtime      Decimal?         @db.Decimal(5, 2)
+  lateMinutes   Int              @default(0) // how many minutes late
+  earlyLeaveMin Int              @default(0) // left early by X minutes
+  lateDeduction Decimal?         @db.Decimal(10, 2) // amount deducted for being late
+  lateForgiven  Boolean          @default(false) // owner override
+  status        AttendanceStatus @default(PRESENT)
+  notes         String?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
 
   employee Employee @relation(fields: [employeeId], references: [id])
   branch   Branch   @relation(fields: [branchId], references: [id])
@@ -1450,25 +1466,87 @@ model PayrollPeriod {
 }
 
 model PayrollEntry {
-  id            String        @id @default(cuid())
-  periodId      String
-  employeeId    String
-  baseSalary    Decimal       @db.Decimal(10, 2)
-  overtime      Decimal       @db.Decimal(10, 2) @default(0)
-  bonuses       Decimal       @db.Decimal(10, 2) @default(0)
-  deductions    Decimal       @db.Decimal(10, 2) @default(0)
-  tax           Decimal       @db.Decimal(10, 2) @default(0)
-  netSalary     Decimal       @db.Decimal(10, 2)
-  paidAt        DateTime?
-  paymentMethod PaymentMethod?
-  notes         String?
-  createdAt     DateTime      @default(now())
+  id              String        @id @default(cuid())
+  periodId        String
+  employeeId      String
+  baseSalary      Decimal       @db.Decimal(10, 2)
+  // Earnings
+  daysWorked      Int           @default(0)
+  daysAbsent      Int           @default(0)
+  daysLate        Int           @default(0)
+  paidOffDaysUsed Int           @default(0) // out of 4
+  paidOffDaysUnused Int         @default(0) // extra pay for unused days
+  extraDaysPay    Decimal       @db.Decimal(10, 2) @default(0) // pay for unused off days
+  overtimeHours   Decimal       @db.Decimal(5, 2) @default(0)
+  overtimeRate    Decimal       @db.Decimal(10, 2) @default(0) // 1x or 1.5x
+  overtimePay     Decimal       @db.Decimal(10, 2) @default(0)
+  // Deductions
+  lateDeductions  Decimal       @db.Decimal(10, 2) @default(0)
+  absentDeductions Decimal      @db.Decimal(10, 2) @default(0)
+  advanceDeduction Decimal      @db.Decimal(10, 2) @default(0)
+  otherDeductions Decimal       @db.Decimal(10, 2) @default(0)
+  // Totals
+  grossSalary     Decimal       @db.Decimal(10, 2) @default(0)
+  totalDeductions Decimal       @db.Decimal(10, 2) @default(0)
+  netSalary       Decimal       @db.Decimal(10, 2)
+  paidAt          DateTime?
+  paymentMethod   PaymentMethod?
+  notes           String?
+  payStubData     Json?         // full breakdown for printing
+  createdAt       DateTime      @default(now())
 
   period   PayrollPeriod @relation(fields: [periodId], references: [id])
   employee Employee      @relation(fields: [employeeId], references: [id])
 
   @@unique([periodId, employeeId])
   @@map("payroll_entries")
+}
+
+model SalaryAdvance {
+  id            String   @id @default(cuid())
+  tenantId      String
+  employeeId    String
+  amount        Decimal  @db.Decimal(10, 2)
+  remainingAmount Decimal @db.Decimal(10, 2) // tracks what's left to deduct
+  monthlyInstallment Decimal? @db.Decimal(10, 2) // if paying in installments
+  reason        String?
+  givenDate     DateTime @db.Date
+  givenById     String?  // admin who approved
+  status        String   @default("ACTIVE") // ACTIVE, FULLY_DEDUCTED, CANCELLED
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  @@map("salary_advances")
+}
+
+model HolidayCalendar {
+  id          String   @id @default(cuid())
+  tenantId    String
+  date        DateTime @db.Date
+  name        String   // "Eid ul Fitr Day 1", "Pakistan Day"
+  overtimeRate Decimal @db.Decimal(3, 1) @default(1.5) // 1.5x for holidays
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, date])
+  @@map("holiday_calendar")
+}
+
+model AttendanceConfig {
+  id              String  @id @default(cuid())
+  tenantId        String  @unique
+  allowedIPs      String[] // WiFi public IPs that are allowed for clock-in
+  gracePeriodMin  Int     @default(0) // 0 = no grace, even 1 min late counts
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@map("attendance_config")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
