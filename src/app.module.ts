@@ -19,6 +19,7 @@ import { FinanceModule } from './modules/finance/finance.module';
 import { CrmModule } from './modules/crm/crm.module';
 import { MarketingModule } from './modules/marketing/marketing.module';
 import { FbrModule } from './modules/fbr/fbr.module';
+import { AuditService } from './common/services/audit.service';
 
 @Module({
   imports: [
@@ -70,5 +71,7 @@ import { FbrModule } from './modules/fbr/fbr.module';
     MarketingModule,
     FbrModule,
   ],
+  providers: [AuditService],
+  exports: [AuditService],
 })
 export class AppModule {}

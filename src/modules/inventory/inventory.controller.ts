@@ -31,6 +31,34 @@ export class InventoryController {
     return this.inventoryService.updateStockItem(u.tenantId, id, body);
   }
 
+  // ─── Stock Batches (FIFO) ─────────────────────────────────────────────────
+
+  @Post('stock-items/:id/batches')
+  @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER, UserRole.INVENTORY_STAFF)
+  @ApiOperation({ summary: 'Add a new batch/brand to a stock item' })
+  addBatch(@Param('id') id: string, @Body() body: any) {
+    return this.inventoryService.addBatch(id, body);
+  }
+
+  @Get('stock-items/:id/batches')
+  @ApiOperation({ summary: 'Get all batches for a stock item' })
+  getBatches(@Param('id') id: string) {
+    return this.inventoryService.getBatches(id);
+  }
+
+  @Patch('batches/:id')
+  @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER, UserRole.INVENTORY_STAFF)
+  @ApiOperation({ summary: 'Update a batch' })
+  updateBatch(@Param('id') id: string, @Body() body: any) {
+    return this.inventoryService.updateBatch(id, body);
+  }
+
+  @Delete('batches/:id')
+  @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER)
+  deleteBatch(@Param('id') id: string) {
+    return this.inventoryService.deleteBatch(id);
+  }
+
   @Get('balances')
   @ApiOperation({ summary: 'Current stock levels by location' })
   getBalances(@CurrentUser() u: JwtPayload, @Query('locationId') locationId?: string) {

@@ -3,6 +3,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { PosService } from './pos.service';
+import { AuditService } from '../../common/services/audit.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '@prisma/client';
@@ -12,7 +13,7 @@ import { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 @ApiBearerAuth()
 @Controller('pos')
 export class PosController {
-  constructor(private posService: PosService) {}
+  constructor(private posService: PosService, private audit: AuditService) {}
 
   // ─── Shifts ──────────────────────────────────────────────────────────────────
 
@@ -54,8 +55,10 @@ export class PosController {
   @Post('orders')
   @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER, UserRole.CASHIER, UserRole.WAITER)
   @ApiOperation({ summary: 'Create new POS order' })
-  createOrder(@CurrentUser() u: JwtPayload, @Body() body: any) {
-    return this.posService.createOrder(u.tenantId, body.branchId || u.branchId || '', u.sub, body);
+  async createOrder(@CurrentUser() u: JwtPayload, @Body() body: any) {
+    const order = await this.posService.createOrder(u.tenantId, body.branchId || u.branchId || '', u.sub, body);
+    this.audit.log({ tenantId: u.tenantId, userId: u.sub, action: 'CREATE', resource: 'PosOrder', resourceId: order.id, newValues: { orderNumber: order.orderNumber, total: order.total, orderType: order.orderType } });
+    return order;
   }
 
   @Get('orders')
@@ -82,12 +85,14 @@ export class PosController {
 
   @Patch('orders/:id/status')
   @ApiOperation({ summary: 'Update order status' })
-  updateOrderStatus(
+  async updateOrderStatus(
     @CurrentUser() u: JwtPayload,
     @Param('id') id: string,
     @Body() body: { status: string },
   ) {
-    return this.posService.updateOrderStatus(u.tenantId, id, body.status);
+    const result = await this.posService.updateOrderStatus(u.tenantId, id, body.status);
+    this.audit.log({ tenantId: u.tenantId, userId: u.sub, action: 'UPDATE', resource: 'PosOrder', resourceId: id, newValues: { status: body.status } });
+    return result;
   }
 
   // ─── Payments ────────────────────────────────────────────────────────────────
@@ -95,19 +100,23 @@ export class PosController {
   @Post('orders/:id/payment')
   @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER, UserRole.CASHIER)
   @ApiOperation({ summary: 'Process payment for an order (supports split payment)' })
-  processPayment(@CurrentUser() u: JwtPayload, @Param('id') id: string, @Body() body: any) {
-    return this.posService.processPayment(
+  async processPayment(@CurrentUser() u: JwtPayload, @Param('id') id: string, @Body() body: any) {
+    const result = await this.posService.processPayment(
       u.tenantId, id, body.payments, body.customerLeft !== false, body.paymentMethod, body.customer,
     );
+    this.audit.log({ tenantId: u.tenantId, userId: u.sub, action: 'PAYMENT', resource: 'PosOrder', resourceId: id, newValues: { method: body.paymentMethod, payments: body.payments?.length } });
+    return result;
   }
 
   @Post('orders/:id/refund')
   @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER)
   @ApiOperation({ summary: 'Process refund for an order' })
-  processRefund(@CurrentUser() u: JwtPayload, @Param('id') id: string, @Body() body: any) {
-    return this.posService.processRefund(
+  async processRefund(@CurrentUser() u: JwtPayload, @Param('id') id: string, @Body() body: any) {
+    const result = await this.posService.processRefund(
       u.tenantId, id, body.amount, body.reason, body.method, u.sub,
     );
+    this.audit.log({ tenantId: u.tenantId, userId: u.sub, action: 'REFUND', resource: 'PosOrder', resourceId: id, newValues: { amount: body.amount, reason: body.reason } });
+    return result;
   }
 
   // ─── Tables ──────────────────────────────────────────────────────────────────

@@ -545,6 +545,7 @@ model User {
   posShiftsClosed  PosShift[] @relation("ShiftClosedBy")
   posOrders     PosOrder[]
   auditLogs     AuditLog[]
+  permission    UserPermission?
 
   @@unique([tenantId, email])
   @@map("users")
@@ -1042,8 +1043,34 @@ model StockItem {
   poLines            PurchaseOrderLine[]
   grnLines           GrnLine[]
   packagingRules     PackagingRule[]
+  batches            StockBatch[]
 
   @@map("stock_items")
+}
+
+model StockBatch {
+  id            String   @id @default(cuid())
+  stockItemId   String
+  locationId    String?
+  brandName     String   // "Heinz", "Knorr", "Prema"
+  supplier      String?  // vendor name or reference
+  packSize      Decimal  @db.Decimal(10, 3) // units per pack in recipe unit
+  packUnit      String?  // "bottle", "carton", "bag"
+  purchasePrice Decimal  @db.Decimal(10, 2) // price paid for this pack
+  unitCost      Decimal  @db.Decimal(10, 4) // purchasePrice / packSize
+  quantityReceived Decimal @db.Decimal(10, 3) // total units received
+  remaining     Decimal  @db.Decimal(10, 3) // what's left in this batch
+  status        String   @default("WAITING") // ACTIVE, WAITING, DEPLETED
+  receivedDate  DateTime @db.Date
+  expiryDate    DateTime? @db.Date
+  batchNumber   String?
+  notes         String?
+  createdAt     DateTime @default(now())
+
+  stockItem StockItem @relation(fields: [stockItemId], references: [id])
+
+  @@index([stockItemId, status])
+  @@map("stock_batches")
 }
 
 model StockLocation {
@@ -1130,8 +1157,8 @@ model RolePermission {
   id              String   @id @default(cuid())
   tenantId        String
   role            UserRole
-  allowedRoutes   String[] // ["/admin/dashboard", "/admin/orders", "/pos/terminal", ...]
-  allowedFeatures String[] // ["menu.delete", "orders.refund", "orders.void", "pos.discount", ...]
+  allowedRoutes   String[]
+  allowedFeatures String[]
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -1139,6 +1166,20 @@ model RolePermission {
 
   @@unique([tenantId, role])
   @@map("role_permissions")
+}
+
+model UserPermission {
+  id              String   @id @default(cuid())
+  tenantId        String
+  userId          String   @unique
+  allowedRoutes   String[] // ["/admin/dashboard", "/admin/orders", "/pos/terminal", ...]
+  allowedFeatures String[] // ["menu.delete", "orders.refund", "orders.void", "pos.discount", ...]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user   User   @relation(fields: [userId], references: [id])
+
+  @@map("user_permissions")
 }
 
 model PackagingRule {

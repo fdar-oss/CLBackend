@@ -1,8 +1,9 @@
 import {
-  Controller, Get, Post, Patch, Body, Param,
+  Controller, Get, Post, Patch, Body, Param, Query,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { UsersService } from './users.service';
+import { AuditService } from '../../common/services/audit.service';
 import { CreateUserDto, UpdateUserDto } from './dto/create-user.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -13,7 +14,7 @@ import { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 @ApiBearerAuth()
 @Controller('users')
 export class UsersController {
-  constructor(private usersService: UsersService) {}
+  constructor(private usersService: UsersService, private auditService: AuditService) {}
 
   @Post()
   @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER)
@@ -32,26 +33,34 @@ export class UsersController {
 
   @Get('access-control')
   @Roles(UserRole.TENANT_OWNER)
-  @ApiOperation({ summary: 'Get all role permissions' })
+  @ApiOperation({ summary: 'Get all user permissions' })
   getAllPermissions(@CurrentUser() u: JwtPayload) {
-    return this.usersService.getAllPermissions(u.tenantId);
+    return this.usersService.getAllUserPermissions(u.tenantId);
   }
 
   @Get('access-control/my')
   @ApiOperation({ summary: 'Get current user permissions' })
   getMyPermissions(@CurrentUser() u: JwtPayload) {
-    return this.usersService.getPermissions(u.tenantId, u.role as any);
+    return this.usersService.getUserPermissions(u.sub);
   }
 
-  @Patch('access-control/:role')
+  @Patch('access-control/user/:userId')
   @Roles(UserRole.TENANT_OWNER)
-  @ApiOperation({ summary: 'Update permissions for a role' })
-  updatePermissions(
-    @CurrentUser() u: JwtPayload,
-    @Param('role') role: string,
+  @ApiOperation({ summary: 'Update permissions for a specific user' })
+  updateUserPermissions(
+    @Param('userId') userId: string,
     @Body() body: { allowedRoutes: string[]; allowedFeatures: string[] },
   ) {
-    return this.usersService.updatePermissions(u.tenantId, role as any, body.allowedRoutes, body.allowedFeatures);
+    return this.usersService.updateUserPermissions(userId, body.allowedRoutes, body.allowedFeatures);
+  }
+
+  // ─── Activity Log ───────────────────────────────────────────────────────────
+
+  @Get('activity-log')
+  @Roles(UserRole.TENANT_OWNER)
+  @ApiOperation({ summary: 'Get audit/activity log' })
+  getActivityLog(@CurrentUser() u: JwtPayload, @Query() filters: any) {
+    return this.auditService.getLogs(u.tenantId, filters);
   }
 
   // ─── User CRUD ──────────────────────────────────────────────────────────────

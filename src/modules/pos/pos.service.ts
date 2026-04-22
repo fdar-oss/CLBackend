@@ -234,8 +234,8 @@ export class PosService {
     }
 
     const subtotal = rawSubtotal - discountAmount;
-    const taxAmount = Math.round((subtotal * effectiveTaxRate) / 100);
-    const total = Math.round(subtotal + taxAmount);
+    const taxAmount = parseFloat(((subtotal * effectiveTaxRate) / 100).toFixed(2));
+    const total = parseFloat((subtotal + taxAmount).toFixed(2));
 
     const order = await this.prisma.posOrder.create({
       data: {

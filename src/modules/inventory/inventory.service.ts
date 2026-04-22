@@ -31,7 +31,13 @@ export class InventoryService {
   async getStockItems(tenantId: string) {
     return this.prisma.stockItem.findMany({
       where: { tenantId, isActive: true },
-      include: { category: true },
+      include: {
+        category: true,
+        batches: {
+          where: { status: { in: ['ACTIVE', 'WAITING'] } },
+          orderBy: { receivedDate: 'asc' },
+        },
+      },
       orderBy: { name: 'asc' },
     });
   }
@@ -40,6 +46,166 @@ export class InventoryService {
     const item = await this.prisma.stockItem.findFirst({ where: { id, tenantId } });
     if (!item) throw new NotFoundException('Stock item not found');
     return this.prisma.stockItem.update({ where: { id }, data });
+  }
+
+  // ─── Stock Batches (FIFO brand tracking) ─────────────────────────────────────
+
+  async addBatch(stockItemId: string, data: any) {
+    const packSize = Number(data.packSize);
+    const purchasePrice = Number(data.purchasePrice);
+    const unitCost = packSize > 0 ? parseFloat((purchasePrice / packSize).toFixed(4)) : 0;
+    const quantityReceived = packSize;
+
+    // Check if there's already an active batch — if not, this one becomes active
+    const activeBatch = await this.prisma.stockBatch.findFirst({
+      where: { stockItemId, status: 'ACTIVE' },
+    });
+
+    const batch = await this.prisma.stockBatch.create({
+      data: {
+        stockItemId,
+        locationId: data.locationId || null,
+        brandName: data.brandName,
+        supplier: data.supplier || null,
+        packSize,
+        packUnit: data.packUnit || null,
+        purchasePrice,
+        unitCost,
+        quantityReceived,
+        remaining: quantityReceived,
+        status: activeBatch ? 'WAITING' : 'ACTIVE',
+        receivedDate: new Date(data.receivedDate || new Date()),
+        expiryDate: data.expiryDate ? new Date(data.expiryDate) : null,
+        batchNumber: data.batchNumber || null,
+        notes: data.notes || null,
+      },
+    });
+
+    // Update the stock item's unitCost to the latest batch (for cost analysis display)
+    await this.prisma.stockItem.update({
+      where: { id: stockItemId },
+      data: { unitCost: activeBatch ? undefined : unitCost },
+    });
+
+    return batch;
+  }
+
+  async getBatches(stockItemId: string) {
+    return this.prisma.stockBatch.findMany({
+      where: { stockItemId },
+      orderBy: [{ status: 'asc' }, { receivedDate: 'asc' }],
+    });
+  }
+
+  async updateBatch(id: string, data: any) {
+    const batch = await this.prisma.stockBatch.findUnique({ where: { id } });
+    if (!batch) throw new NotFoundException('Batch not found');
+
+    const updates: any = {};
+    if (data.brandName !== undefined) updates.brandName = data.brandName;
+    if (data.supplier !== undefined) updates.supplier = data.supplier;
+    if (data.packUnit !== undefined) updates.packUnit = data.packUnit;
+    if (data.notes !== undefined) updates.notes = data.notes;
+    if (data.remaining !== undefined) updates.remaining = data.remaining;
+    if (data.packSize !== undefined && data.purchasePrice !== undefined) {
+      updates.packSize = data.packSize;
+      updates.purchasePrice = data.purchasePrice;
+      updates.unitCost = parseFloat((data.purchasePrice / data.packSize).toFixed(4));
+    } else if (data.packSize !== undefined) {
+      updates.packSize = data.packSize;
+      updates.unitCost = parseFloat((Number(batch.purchasePrice) / data.packSize).toFixed(4));
+    } else if (data.purchasePrice !== undefined) {
+      updates.purchasePrice = data.purchasePrice;
+      updates.unitCost = parseFloat((data.purchasePrice / Number(batch.packSize)).toFixed(4));
+    }
+
+    const updated = await this.prisma.stockBatch.update({ where: { id }, data: updates });
+
+    // If this is the active batch, update the stock item's unitCost too
+    if (updated.status === 'ACTIVE' && updates.unitCost) {
+      await this.prisma.stockItem.update({
+        where: { id: updated.stockItemId },
+        data: { unitCost: updates.unitCost },
+      });
+    }
+
+    return updated;
+  }
+
+  async deleteBatch(id: string) {
+    await this.prisma.stockBatch.delete({ where: { id } });
+    return { deleted: true };
+  }
+
+  /**
+   * FIFO deduction: deduct quantity from the oldest active batch first.
+   * If the active batch runs out, mark it DEPLETED and activate the next WAITING batch.
+   * Updates the stock item's unitCost to the newly active batch's rate.
+   */
+  async deductFromBatches(stockItemId: string, quantity: number): Promise<{ deducted: number; activeBrandName: string | null }> {
+    let remaining = quantity;
+    let activeBrandName: string | null = null;
+
+    // Get batches in FIFO order: ACTIVE first, then WAITING by receivedDate
+    const batches = await this.prisma.stockBatch.findMany({
+      where: { stockItemId, status: { in: ['ACTIVE', 'WAITING'] } },
+      orderBy: [{ status: 'asc' }, { receivedDate: 'asc' }],
+    });
+
+    for (const batch of batches) {
+      if (remaining <= 0) break;
+
+      const batchRemaining = Number(batch.remaining);
+      if (batchRemaining <= 0) continue;
+
+      // Activate waiting batch if no active one
+      if (batch.status === 'WAITING') {
+        await this.prisma.stockBatch.update({
+          where: { id: batch.id },
+          data: { status: 'ACTIVE' },
+        });
+        // Update stock item cost to this batch's rate
+        await this.prisma.stockItem.update({
+          where: { id: stockItemId },
+          data: { unitCost: batch.unitCost },
+        });
+      }
+
+      const deductFromThis = Math.min(remaining, batchRemaining);
+      const newRemaining = parseFloat((batchRemaining - deductFromThis).toFixed(3));
+
+      await this.prisma.stockBatch.update({
+        where: { id: batch.id },
+        data: {
+          remaining: newRemaining,
+          status: newRemaining <= 0 ? 'DEPLETED' : 'ACTIVE',
+        },
+      });
+
+      remaining -= deductFromThis;
+      activeBrandName = batch.brandName;
+
+      // If this batch is now depleted, activate the next waiting one
+      if (newRemaining <= 0) {
+        const nextBatch = await this.prisma.stockBatch.findFirst({
+          where: { stockItemId, status: 'WAITING' },
+          orderBy: { receivedDate: 'asc' },
+        });
+        if (nextBatch) {
+          await this.prisma.stockBatch.update({
+            where: { id: nextBatch.id },
+            data: { status: 'ACTIVE' },
+          });
+          await this.prisma.stockItem.update({
+            where: { id: stockItemId },
+            data: { unitCost: nextBatch.unitCost },
+          });
+          activeBrandName = nextBatch.brandName;
+        }
+      }
+    }
+
+    return { deducted: quantity - remaining, activeBrandName };
   }
 
   // ─── Stock Balances ──────────────────────────────────────────────────────────
@@ -217,16 +383,23 @@ export class InventoryService {
           // Convert recipe unit to stock unit (e.g. 10g → 0.01kg)
           const stockItem = await this.prisma.stockItem.findUnique({ where: { id: ing.stockItemId }, select: { unit: true } });
           const convertedQty = convertUnit(Number(ing.quantity), ing.unit, stockItem?.unit || ing.unit);
-          const deductQty = convertedQty * Number(ing.wasteFactor) * item.quantity * -1;
+          const deductQty = convertedQty * Number(ing.wasteFactor) * item.quantity;
+
+          // FIFO batch deduction
+          await this.deductFromBatches(ing.stockItemId, deductQty).catch(err => {
+            this.logger.warn(`Batch deduction failed for ${ing.stockItemId}: ${err.message}`);
+          });
+
+          // Also record in stock movements + balance (for overall tracking)
           await this.recordMovement({
             stockItemId: ing.stockItemId,
             locationId: defaultLocation.id,
             type: 'SALE_DEDUCTION',
-            quantity: deductQty,
+            quantity: deductQty * -1,
             reference: order.id,
             referenceType: 'POS_ORDER',
           }).catch(err => {
-            this.logger.warn(`Stock deduction failed for item ${ing.stockItemId}: ${err.message}`);
+            this.logger.warn(`Stock movement failed for item ${ing.stockItemId}: ${err.message}`);
           });
         }
       }

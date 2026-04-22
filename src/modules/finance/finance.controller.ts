@@ -15,7 +15,7 @@ export class FinanceController {
   @Get('dashboard')
   @ApiOperation({ summary: 'Real-time dashboard: today revenue, top sellers, hourly, weekly trend' })
   getDashboard(@CurrentUser() u: JwtPayload, @Query('branchId') branchId?: string) {
-    return this.svc.getDashboard(u.tenantId, branchId || u.branchId || undefined);
+    return this.svc.getDashboard(u.tenantId, branchId || undefined);
   }
 
   @Post('expenses')

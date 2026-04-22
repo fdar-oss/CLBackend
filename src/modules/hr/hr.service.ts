@@ -397,14 +397,18 @@ export class HrService {
         // Absent deductions (unapproved absences — no pay)
         const absentDeductions = Math.round(daysAbsent * dailySalary);
 
-        // Paid off days: 4 per month
-        // If worked more than workingDays, unused off days = extra pay
-        const offDaysUsedForLeave = Math.min(daysOnLeave, paidOffDays);
+        // Paid off days: prorated based on days worked
+        // Formula: earnedPaidDays = (daysWorked / workingDays) × paidOffDays
+        // If they took paid leave early but didn't earn it, it gets deducted
         const totalDaysWorked = daysPresent;
+        const earnedPaidDays = Math.floor((totalDaysWorked / workingDays) * paidOffDays);
+        const offDaysUsedForLeave = Math.min(daysOnLeave, earnedPaidDays);
+        const unearnedLeaveTaken = Math.max(0, daysOnLeave - earnedPaidDays); // took paid days they didn't earn
         const unusedPaidDays = totalDaysWorked >= workingDays
-          ? paidOffDays - offDaysUsedForLeave
-          : 0;
+          ? earnedPaidDays - offDaysUsedForLeave
+          : Math.max(0, earnedPaidDays - offDaysUsedForLeave);
         const extraDaysPay = Math.round(unusedPaidDays * dailySalary);
+        const unearnedLeaveDeduction = Math.round(unearnedLeaveTaken * dailySalary);
 
         // Advance deduction
         const activeAdvances = await tx.salaryAdvance.findMany({
@@ -428,7 +432,7 @@ export class HrService {
 
         // Calculate totals
         const grossSalary = baseSalary + totalOvertimePay + extraDaysPay;
-        const totalDeductions = lateDeductions + absentDeductions + advanceDeduction;
+        const totalDeductions = lateDeductions + absentDeductions + advanceDeduction + unearnedLeaveDeduction;
         const netSalary = Math.max(0, grossSalary - totalDeductions);
 
         const payStubData = {
@@ -441,7 +445,8 @@ export class HrService {
           daysPresent, daysAbsent, daysLate, daysOnLeave,
           totalOvertimeHours: Math.round(totalOvertimeHours * 10) / 10,
           overtimePay: totalOvertimePay,
-          extraDaysPay, unusedPaidDays,
+          earnedPaidDays, extraDaysPay, unusedPaidDays,
+          unearnedLeaveTaken, unearnedLeaveDeduction,
           lateDeductions, absentDeductions, advanceDeduction,
           grossSalary, totalDeductions, netSalary,
           bankAccount: emp.bankAccount, bankName: emp.bankName,

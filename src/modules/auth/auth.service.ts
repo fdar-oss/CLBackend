@@ -158,25 +158,21 @@ export class AuthService {
     });
     if (!user) return null;
 
-    // Attach permissions
+    // Attach per-user permissions
     const { UsersService } = await import('../users/users.service');
-    const allRoutes = UsersService.ALL_ROUTES;
-    const allFeatures = UsersService.ALL_FEATURES;
 
-    if (user.role === 'TENANT_OWNER') {
-      return { ...user, permissions: { allowedRoutes: allRoutes, allowedFeatures: allFeatures } };
+    const userPerm = await this.prisma.userPermission.findUnique({ where: { userId: user.id } });
+
+    if (user.role === 'TENANT_OWNER' && !userPerm) {
+      // Main admin — full access
+      return { ...user, permissions: { allowedRoutes: UsersService.ALL_ROUTES, allowedFeatures: UsersService.ALL_FEATURES } };
     }
 
-    const perm = await this.prisma.rolePermission.findUnique({
-      where: { tenantId_role: { tenantId: user.tenantId, role: user.role as any } },
-    });
-
-    const defaults = (UsersService as any).DEFAULTS?.[user.role] || { routes: [], features: [] };
     return {
       ...user,
       permissions: {
-        allowedRoutes: perm?.allowedRoutes || defaults.routes,
-        allowedFeatures: perm?.allowedFeatures || defaults.features,
+        allowedRoutes: userPerm?.allowedRoutes ?? [],
+        allowedFeatures: userPerm?.allowedFeatures ?? [],
       },
     };
   }

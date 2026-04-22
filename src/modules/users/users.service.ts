@@ -98,58 +98,82 @@ export class UsersService {
     'users.manage', 'users.access_control',
   ];
 
-  // No defaults — admin configures everything manually via Access Control page
-  // TENANT_OWNER always gets full access (hardcoded, cannot be changed)
-  private static DEFAULTS: Record<string, { routes: string[]; features: string[] }> = {
-    TENANT_OWNER: {
-      routes: [...UsersService.ALL_ROUTES],
-      features: [...UsersService.ALL_FEATURES],
-    },
-  };
+  // ─── Per-User Access Control ─────────────────────────────────────────────────
 
-  async getPermissions(tenantId: string, role: string) {
-    // TENANT_OWNER always gets full access
-    if (role === 'TENANT_OWNER') {
-      return { role, allowedRoutes: UsersService.ALL_ROUTES, allowedFeatures: UsersService.ALL_FEATURES };
+  async getUserPermissions(userId: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, role: true, email: true } });
+    if (!user) return null;
+
+    // The main admin account (first TENANT_OWNER) always gets full access
+    if (user.role === 'TENANT_OWNER') {
+      // Check if this is THE admin — we check by seeing if they have a permission record
+      // If no record exists for an owner, they get full access by default
+      const record = await this.prisma.userPermission.findUnique({ where: { userId } });
+      if (!record) {
+        return { userId, allowedRoutes: UsersService.ALL_ROUTES, allowedFeatures: UsersService.ALL_FEATURES };
+      }
+      return { userId, allowedRoutes: record.allowedRoutes, allowedFeatures: record.allowedFeatures };
     }
 
-    const record = await this.prisma.rolePermission.findUnique({
-      where: { tenantId_role: { tenantId, role: role as any } },
-    });
-
-    if (record) {
-      return { role, allowedRoutes: record.allowedRoutes, allowedFeatures: record.allowedFeatures };
-    }
-
-    // Fallback to defaults
-    const defaults = UsersService.DEFAULTS[role] || { routes: [], features: [] };
-    return { role, allowedRoutes: defaults.routes, allowedFeatures: defaults.features };
+    const record = await this.prisma.userPermission.findUnique({ where: { userId } });
+    return {
+      userId,
+      allowedRoutes: record?.allowedRoutes ?? [],
+      allowedFeatures: record?.allowedFeatures ?? [],
+    };
   }
 
-  async getAllPermissions(tenantId: string) {
-    const roles = ['TENANT_OWNER', 'MANAGER', 'CASHIER', 'WAITER', 'CHEF', 'INVENTORY_STAFF', 'HR_MANAGER', 'FINANCE_MANAGER', 'MARKETING_MANAGER'];
-    const result: any[] = [];
+  async getAllUserPermissions(tenantId: string) {
+    const users = await this.prisma.user.findMany({
+      where: { tenantId, isActive: true },
+      select: { id: true, fullName: true, email: true, role: true },
+      orderBy: { fullName: 'asc' },
+    });
 
-    for (const role of roles) {
-      const perm = await this.getPermissions(tenantId, role);
-      result.push(perm);
-    }
+    const permissions = await this.prisma.userPermission.findMany({
+      where: { userId: { in: users.map(u => u.id) } },
+    });
+    const permMap = new Map(permissions.map(p => [p.userId, p]));
 
     return {
-      roles: result,
+      users: users.map(u => {
+        const perm = permMap.get(u.id);
+        const isMainAdmin = u.role === 'TENANT_OWNER' && !perm;
+        return {
+          ...u,
+          allowedRoutes: isMainAdmin ? UsersService.ALL_ROUTES : (perm?.allowedRoutes ?? []),
+          allowedFeatures: isMainAdmin ? UsersService.ALL_FEATURES : (perm?.allowedFeatures ?? []),
+          isMainAdmin,
+        };
+      }),
       allRoutes: UsersService.ALL_ROUTES,
       allFeatures: UsersService.ALL_FEATURES,
     };
   }
 
-  async updatePermissions(tenantId: string, role: string, allowedRoutes: string[], allowedFeatures: string[]) {
-    // Cannot modify TENANT_OWNER permissions
-    if (role === 'TENANT_OWNER') return this.getPermissions(tenantId, role);
-
-    return this.prisma.rolePermission.upsert({
-      where: { tenantId_role: { tenantId, role: role as any } },
+  async updateUserPermissions(userId: string, allowedRoutes: string[], allowedFeatures: string[]) {
+    return this.prisma.userPermission.upsert({
+      where: { userId },
       update: { allowedRoutes, allowedFeatures },
-      create: { tenantId, role: role as any, allowedRoutes, allowedFeatures },
+      create: { userId, tenantId: (await this.prisma.user.findUnique({ where: { id: userId }, select: { tenantId: true } }))!.tenantId, allowedRoutes, allowedFeatures },
     });
+  }
+
+  // Keep old method for backward compat
+  async getPermissions(tenantId: string, role: string, userId?: string) {
+    if (userId) return this.getUserPermissions(userId);
+    if (role === 'TENANT_OWNER') {
+      return { role, allowedRoutes: UsersService.ALL_ROUTES, allowedFeatures: UsersService.ALL_FEATURES };
+    }
+    return { role, allowedRoutes: [] as string[], allowedFeatures: [] as string[] };
+  }
+
+  async getAllPermissions(tenantId: string) {
+    return this.getAllUserPermissions(tenantId);
+  }
+
+  async updatePermissions(tenantId: string, role: string, allowedRoutes: string[], allowedFeatures: string[]) {
+    // This is now unused — kept for backward compat
+    return { role, allowedRoutes, allowedFeatures };
   }
 }
