@@ -270,11 +270,17 @@ export class PosService {
       },
     });
 
-    // Update table status
+    // Update table status with time tracking
     if (tableId) {
+      const server = servedById ? await this.prisma.user.findUnique({ where: { id: servedById }, select: { fullName: true } }) : null;
       await this.prisma.restaurantTable.update({
         where: { id: tableId },
-        data: { status: 'OCCUPIED' },
+        data: {
+          status: 'OCCUPIED',
+          occupiedSince: new Date(),
+          currentOrderId: order.id,
+          servedBy: server?.fullName || null,
+        },
       });
     }
 
@@ -350,7 +356,7 @@ export class PosService {
     if (status === 'COMPLETED' && order.tableId) {
       await this.prisma.restaurantTable.update({
         where: { id: order.tableId },
-        data: { status: 'AVAILABLE' },
+        data: { status: 'AVAILABLE', occupiedSince: null, currentOrderId: null, servedBy: null },
       });
     }
 
@@ -467,7 +473,7 @@ export class PosService {
       if (order.tableId && customerLeft) {
         await tx.restaurantTable.update({
           where: { id: order.tableId },
-          data: { status: 'AVAILABLE' },
+          data: { status: 'AVAILABLE', occupiedSince: null, currentOrderId: null, servedBy: null },
         });
       }
 
@@ -511,13 +517,18 @@ export class PosService {
       where: { branchId, isActive: true },
       include: {
         posOrders: {
-          where: { status: { in: ['PENDING', 'CONFIRMED', 'IN_PROGRESS'] } },
-          include: { orderItems: true },
+          where: { status: { in: ['PENDING', 'CONFIRMED', 'IN_PROGRESS', 'COMPLETED'] } },
+          include: { orderItems: true, payments: true, createdBy: { select: { fullName: true } } },
           take: 1,
           orderBy: { createdAt: 'desc' },
         },
+        reservations: {
+          where: { status: 'CONFIRMED', date: { gte: new Date(new Date().setHours(0, 0, 0, 0)) } },
+          take: 1,
+          orderBy: { date: 'asc' },
+        },
       },
-      orderBy: { number: 'asc' },
+      orderBy: [{ section: 'asc' }, { number: 'asc' }],
     });
   }
 
@@ -525,7 +536,33 @@ export class PosService {
     return this.prisma.restaurantTable.create({ data: { branchId, ...data } });
   }
 
+  async setTableCleaning(branchId: string, tableId: string) {
+    await this.prisma.restaurantTable.update({
+      where: { id: tableId },
+      data: { status: 'CLEANING', currentOrderId: null, servedBy: null },
+    });
+    // Auto-release after 5 minutes
+    setTimeout(async () => {
+      try {
+        const table = await this.prisma.restaurantTable.findUnique({ where: { id: tableId } });
+        if (table?.status === 'CLEANING') {
+          await this.prisma.restaurantTable.update({
+            where: { id: tableId },
+            data: { status: 'AVAILABLE', occupiedSince: null },
+          });
+        }
+      } catch {}
+    }, 5 * 60 * 1000);
+    return { status: 'CLEANING' };
+  }
+
   async updateTableStatus(branchId: string, tableId: string, status: string) {
+    const data: any = { status: status as any };
+    if (status === 'AVAILABLE') {
+      data.occupiedSince = null;
+      data.currentOrderId = null;
+      data.servedBy = null;
+    }
     return this.prisma.restaurantTable.updateMany({
       where: { id: tableId, branchId },
       data: { status: status as any },

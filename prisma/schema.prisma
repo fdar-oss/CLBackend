@@ -775,19 +775,22 @@ model Discount {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 model RestaurantTable {
-  id         String      @id @default(cuid())
-  branchId   String
-  number     String // "T1", "Outdoor-3"
-  name       String?
-  capacity   Int         @default(4)
-  section    String? // "Indoor", "Outdoor", "Terrace", "VIP"
-  status     TableStatus @default(AVAILABLE)
-  qrCode     String?
-  isActive   Boolean     @default(true)
-  posX       Float? // for floor plan layout
-  posY       Float?
-  createdAt  DateTime    @default(now())
-  updatedAt  DateTime    @updatedAt
+  id             String      @id @default(cuid())
+  branchId       String
+  number         String // "T1", "Outdoor-3"
+  name           String?
+  capacity       Int         @default(4)
+  section        String? // "Indoor", "Outdoor", "Terrace", "VIP"
+  status         TableStatus @default(AVAILABLE)
+  occupiedSince  DateTime?   // when the table was occupied — for time tracking
+  currentOrderId String?     // quick reference to the active order
+  servedBy       String?     // staff name serving this table
+  qrCode         String?
+  isActive       Boolean     @default(true)
+  posX           Float?
+  posY           Float?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
 
   branch       Branch        @relation(fields: [branchId], references: [id])
   posOrders    PosOrder[]
@@ -1044,8 +1047,38 @@ model StockItem {
   grnLines           GrnLine[]
   packagingRules     PackagingRule[]
   batches            StockBatch[]
+  isHouseMade        Boolean        @default(false) // true = sauce/dressing made in-house
+  prepRecipe         PrepRecipe?    // how to make this item from raw ingredients
+  usedInPrepRecipes  PrepIngredient[] @relation("PrepIngredientItem")
 
   @@map("stock_items")
+}
+
+model PrepRecipe {
+  id          String   @id @default(cuid())
+  stockItemId String   @unique // the house-made item (e.g. Garlic Aioli)
+  yield       Decimal  @db.Decimal(10, 3) // how many units one batch makes (e.g. 200ml)
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  stockItem   StockItem          @relation(fields: [stockItemId], references: [id], onDelete: Cascade)
+  ingredients PrepIngredient[]
+
+  @@map("prep_recipes")
+}
+
+model PrepIngredient {
+  id            String  @id @default(cuid())
+  prepRecipeId  String
+  stockItemId   String  // raw ingredient (garlic, oil, etc.)
+  quantity      Decimal @db.Decimal(10, 4)
+  unit          String
+
+  prepRecipe PrepRecipe @relation(fields: [prepRecipeId], references: [id], onDelete: Cascade)
+  stockItem  StockItem  @relation("PrepIngredientItem", fields: [stockItemId], references: [id])
+
+  @@map("prep_ingredients")
 }
 
 model StockBatch {

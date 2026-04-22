@@ -208,6 +208,111 @@ export class InventoryService {
     return { deducted: quantity - remaining, activeBrandName };
   }
 
+  // ─── Prep Recipes (house-made sauces/dressings) ──────────────────────────────
+
+  async upsertPrepRecipe(stockItemId: string, data: any) {
+    const { ingredients, yield: batchYield, notes } = data;
+
+    // Mark item as house-made
+    await this.prisma.stockItem.update({ where: { id: stockItemId }, data: { isHouseMade: true } });
+
+    const existing = await this.prisma.prepRecipe.findUnique({ where: { stockItemId } });
+
+    if (existing) {
+      return this.prisma.prepRecipe.update({
+        where: { id: existing.id },
+        data: {
+          yield: batchYield,
+          notes,
+          ingredients: { deleteMany: {}, create: ingredients },
+        },
+        include: { ingredients: { include: { stockItem: true } } },
+      });
+    }
+
+    return this.prisma.prepRecipe.create({
+      data: {
+        stockItemId,
+        yield: batchYield,
+        notes,
+        ingredients: { create: ingredients },
+      },
+      include: { ingredients: { include: { stockItem: true } } },
+    });
+  }
+
+  async getPrepRecipe(stockItemId: string) {
+    return this.prisma.prepRecipe.findUnique({
+      where: { stockItemId },
+      include: { ingredients: { include: { stockItem: true } } },
+    });
+  }
+
+  /**
+   * "Make a Batch" — deducts raw ingredients, adds house-made stock.
+   * @param stockItemId The house-made item (e.g. Garlic Aioli)
+   * @param batches How many batches to produce (default 1)
+   * @param locationId Where to add/deduct stock
+   */
+  async producePrep(stockItemId: string, locationId: string, batches = 1) {
+    const recipe = await this.prisma.prepRecipe.findUnique({
+      where: { stockItemId },
+      include: { ingredients: { include: { stockItem: true } } },
+    });
+    if (!recipe) throw new NotFoundException('No prep recipe found for this item');
+
+    const batchYield = Number(recipe.yield) * batches;
+
+    // Deduct raw ingredients
+    for (const ing of recipe.ingredients) {
+      const rawQty = Number(ing.quantity) * batches;
+      const stockUnit = ing.stockItem.unit;
+      const convertedQty = convertUnit(rawQty, ing.unit, stockUnit);
+
+      // FIFO batch deduction
+      await this.deductFromBatches(ing.stockItemId, convertedQty).catch(() => {});
+
+      // Record movement
+      await this.recordMovement({
+        stockItemId: ing.stockItemId,
+        locationId,
+        type: 'SALE_DEDUCTION',
+        quantity: convertedQty * -1,
+        reference: stockItemId,
+        referenceType: 'PREP_PRODUCTION',
+        notes: `Used for prep: ${batches} batch(es)`,
+      }).catch(() => {});
+    }
+
+    // Add the produced item to stock
+    await this.recordMovement({
+      stockItemId,
+      locationId,
+      type: 'PURCHASE',
+      quantity: batchYield,
+      reference: stockItemId,
+      referenceType: 'PREP_PRODUCTION',
+      notes: `Produced ${batches} batch(es) = ${batchYield} ${(await this.prisma.stockItem.findUnique({ where: { id: stockItemId }, select: { unit: true } }))?.unit}`,
+    });
+
+    // Calculate cost: sum of raw ingredient costs
+    let totalCost = 0;
+    for (const ing of recipe.ingredients) {
+      const rawQty = Number(ing.quantity) * batches;
+      const convertedQty = convertUnit(rawQty, ing.unit, ing.stockItem.unit);
+      totalCost += convertedQty * Number(ing.stockItem.unitCost || 0);
+    }
+    const unitCost = batchYield > 0 ? parseFloat((totalCost / batchYield).toFixed(4)) : 0;
+
+    // Update the stock item's unit cost based on production cost
+    await this.prisma.stockItem.update({
+      where: { id: stockItemId },
+      data: { unitCost },
+    });
+
+    return { produced: batchYield, unitCost, totalCost, batches };
+  }
+
   // ─── Stock Balances ──────────────────────────────────────────────────────────
 
   async getBalances(tenantId: string, locationId?: string) {

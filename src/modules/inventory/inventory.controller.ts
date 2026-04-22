@@ -59,6 +59,28 @@ export class InventoryController {
     return this.inventoryService.deleteBatch(id);
   }
 
+  // ─── Prep Recipes (house-made items) ──────────────────────────────────────
+
+  @Post('prep-recipes/:stockItemId')
+  @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER)
+  @ApiOperation({ summary: 'Create/update production recipe for a house-made item' })
+  upsertPrepRecipe(@Param('stockItemId') stockItemId: string, @Body() body: any) {
+    return this.inventoryService.upsertPrepRecipe(stockItemId, body);
+  }
+
+  @Get('prep-recipes/:stockItemId')
+  @ApiOperation({ summary: 'Get production recipe for a house-made item' })
+  getPrepRecipe(@Param('stockItemId') stockItemId: string) {
+    return this.inventoryService.getPrepRecipe(stockItemId);
+  }
+
+  @Post('prep-recipes/:stockItemId/produce')
+  @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER, UserRole.INVENTORY_STAFF)
+  @ApiOperation({ summary: 'Make a batch — deducts raw ingredients, adds produced stock' })
+  producePrep(@Param('stockItemId') stockItemId: string, @Body() body: { locationId: string; batches?: number }) {
+    return this.inventoryService.producePrep(stockItemId, body.locationId, body.batches || 1);
+  }
+
   @Get('balances')
   @ApiOperation({ summary: 'Current stock levels by location' })
   getBalances(@CurrentUser() u: JwtPayload, @Query('locationId') locationId?: string) {

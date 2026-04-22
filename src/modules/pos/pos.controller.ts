@@ -146,6 +146,12 @@ export class PosController {
     );
   }
 
+  @Patch('tables/:id/cleaning')
+  @ApiOperation({ summary: 'Set table to cleaning (auto-releases after 5 min)' })
+  setTableCleaning(@CurrentUser() u: JwtPayload, @Param('id') id: string) {
+    return this.posService.setTableCleaning(u.branchId || '', id);
+  }
+
   // ─── KDS ─────────────────────────────────────────────────────────────────────
 
   @Get('kds/tickets')
