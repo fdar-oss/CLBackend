@@ -55,6 +55,16 @@ export class FinanceController {
     return this.svc.buildDailySummary(body.branchId, new Date(body.date));
   }
 
+  @Get('reports/eod')
+  @ApiOperation({ summary: 'End of Day report with per-shift item breakdowns' })
+  getEODReport(
+    @CurrentUser() u: JwtPayload,
+    @Query('date') date: string,
+    @Query('branchId') branchId?: string,
+  ) {
+    return this.svc.getEODReport(u.tenantId, date, branchId);
+  }
+
   @Get('reports/sales')
   @ApiOperation({ summary: 'Sales report for a date range' })
   getSalesReport(

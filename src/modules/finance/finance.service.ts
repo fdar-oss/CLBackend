@@ -99,6 +99,171 @@ export class FinanceService {
     });
   }
 
+  // ─── End of Day Report ───────────────────────────────────────────────────────
+
+  async getEODReport(tenantId: string, date: string, branchId?: string) {
+    const dayStart = new Date(date); dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(date); dayEnd.setHours(23, 59, 59, 999);
+    const branchFilter = branchId ? { branchId } : {};
+
+    // All orders for the day
+    const allOrders = await this.prisma.posOrder.findMany({
+      where: { tenantId, ...branchFilter, createdAt: { gte: dayStart, lte: dayEnd } },
+      include: { payments: true, orderItems: true, createdBy: { select: { fullName: true } } },
+    });
+
+    const completed = allOrders.filter(o => o.status === 'COMPLETED');
+    const cancelled = allOrders.filter(o => o.status === 'CANCELLED');
+    const refunded = allOrders.filter(o => o.status === 'REFUNDED');
+
+    // Sales summary
+    const grossSales = completed.reduce((s, o) => s + Number(o.total), 0);
+    const totalSubtotal = completed.reduce((s, o) => s + Number(o.subtotal), 0);
+    const totalTax = completed.reduce((s, o) => s + Number(o.taxAmount), 0);
+    const totalDiscount = completed.reduce((s, o) => s + Number(o.discountAmount || 0), 0);
+
+    // Payment methods
+    const allPayments = completed.flatMap(o => o.payments).filter(p => p.status === 'COMPLETED');
+    const cashSales = allPayments.filter(p => p.method === 'CASH').reduce((s, p) => s + Number(p.amount), 0);
+    const cardSales = allPayments.filter(p => p.method === 'CARD').reduce((s, p) => s + Number(p.amount), 0);
+    const bankSales = allPayments.filter(p => p.method === 'BANK_TRANSFER').reduce((s, p) => s + Number(p.amount), 0);
+
+    // Order types
+    const dineIn = completed.filter(o => o.orderType === 'DINE_IN').length;
+    const takeaway = completed.filter(o => o.orderType === 'TAKEAWAY').length;
+    const delivery = completed.filter(o => o.orderType === 'DELIVERY').length;
+
+    // Voids & refunds value
+    const voidedValue = cancelled.reduce((s, o) => s + Number(o.total), 0);
+    const refundedValue = refunded.reduce((s, o) => s + Number(o.total), 0);
+
+    // Commission
+    const commissionOrders = completed.filter(o => o.orderTakerId);
+    const totalCommission = commissionOrders.reduce((s, o) => s + Number((o as any).commissionAmount || 0), 0);
+    const commissionByTaker: Record<string, { name: string; orders: number; subtotal: number; commission: number }> = {};
+    for (const o of commissionOrders) {
+      const key = o.orderTakerId!;
+      if (!commissionByTaker[key]) commissionByTaker[key] = { name: (o as any).orderTakerName || 'Unknown', orders: 0, subtotal: 0, commission: 0 };
+      commissionByTaker[key].orders += 1;
+      commissionByTaker[key].subtotal += Number(o.subtotal);
+      commissionByTaker[key].commission += Number((o as any).commissionAmount || 0);
+    }
+
+    // Combined item breakdown
+    const allItemMap: Record<string, { name: string; qty: number; revenue: number }> = {};
+    for (const o of completed) {
+      for (const item of o.orderItems) {
+        const key = item.itemName;
+        if (!allItemMap[key]) allItemMap[key] = { name: key, qty: 0, revenue: 0 };
+        allItemMap[key].qty += item.quantity;
+        allItemMap[key].revenue += Number(item.lineTotal);
+      }
+    }
+    const allItems = Object.values(allItemMap).sort((a, b) => b.qty - a.qty);
+
+    // Per-shift breakdown
+    const shifts = await this.prisma.posShift.findMany({
+      where: {
+        ...branchFilter,
+        OR: [
+          { openedAt: { gte: dayStart, lte: dayEnd } },
+          { closedAt: { gte: dayStart, lte: dayEnd } },
+          { openedAt: { lte: dayStart }, closedAt: null }, // still open from before
+          { openedAt: { lte: dayStart }, closedAt: { gte: dayEnd } }, // spans entire day
+        ],
+      },
+      include: {
+        openedBy: { select: { fullName: true } },
+        closedBy: { select: { fullName: true } },
+      },
+      orderBy: { openedAt: 'asc' },
+    });
+
+    const shiftBreakdowns: any[] = [];
+    for (const shift of shifts) {
+      const shiftOrders = completed.filter(o => {
+        const orderTime = new Date(o.createdAt);
+        const shiftStart = new Date(shift.openedAt);
+        const shiftEnd = shift.closedAt ? new Date(shift.closedAt) : dayEnd;
+        return orderTime >= shiftStart && orderTime <= shiftEnd;
+      });
+
+      const shiftItemMap: Record<string, { name: string; qty: number; revenue: number }> = {};
+      for (const o of shiftOrders) {
+        for (const item of o.orderItems) {
+          const key = item.itemName;
+          if (!shiftItemMap[key]) shiftItemMap[key] = { name: key, qty: 0, revenue: 0 };
+          shiftItemMap[key].qty += item.quantity;
+          shiftItemMap[key].revenue += Number(item.lineTotal);
+        }
+      }
+
+      shiftBreakdowns.push({
+        shiftId: shift.id,
+        openedBy: shift.openedBy?.fullName || 'Unknown',
+        closedBy: shift.closedBy?.fullName || null,
+        openedAt: shift.openedAt,
+        closedAt: shift.closedAt,
+        status: shift.status,
+        openingFloat: Number(shift.openingFloat),
+        closingCash: shift.closingCash ? Number(shift.closingCash) : null,
+        cashVariance: shift.cashVariance ? Number(shift.cashVariance) : null,
+        totalOrders: shiftOrders.length,
+        totalSales: shiftOrders.reduce((s, o) => s + Number(o.total), 0),
+        items: Object.values(shiftItemMap).sort((a, b) => b.qty - a.qty),
+      });
+    }
+
+    // Expenses
+    const expenses = await this.prisma.expense.findMany({
+      where: { tenantId, ...branchFilter, date: { gte: dayStart, lte: dayEnd }, status: 'APPROVED' },
+      include: { category: true },
+    });
+    const totalExpenses = expenses.reduce((s, e) => s + Number(e.amount), 0);
+    const expensesByCategory: Record<string, number> = {};
+    for (const e of expenses) {
+      const cat = e.category?.name || 'Uncategorized';
+      expensesByCategory[cat] = (expensesByCategory[cat] || 0) + Number(e.amount);
+    }
+
+    return {
+      date,
+      branchId,
+      sales: {
+        totalOrders: completed.length,
+        grossSales,
+        subtotal: totalSubtotal,
+        tax: totalTax,
+        discounts: totalDiscount,
+        netRevenue: grossSales,
+        avgOrderValue: completed.length > 0 ? grossSales / completed.length : 0,
+      },
+      payments: { cash: cashSales, card: cardSales, bank: bankSales },
+      orderTypes: { dineIn, takeaway, delivery },
+      voidsAndRefunds: {
+        voidedCount: cancelled.length, voidedValue,
+        refundedCount: refunded.length, refundedValue,
+      },
+      commission: {
+        total: totalCommission,
+        byTaker: Object.values(commissionByTaker),
+      },
+      shifts: shiftBreakdowns,
+      allItems,
+      expenses: {
+        total: totalExpenses,
+        byCategory: Object.entries(expensesByCategory).map(([category, total]) => ({ category, total })),
+        items: expenses.map(e => ({ description: e.description, amount: Number(e.amount), category: e.category?.name })),
+      },
+      dailyPL: {
+        revenue: grossSales,
+        expenses: totalExpenses,
+        commission: totalCommission,
+        netProfit: grossSales - totalExpenses - totalCommission,
+      },
+    };
+  }
+
   // ─── Dashboard (real-time from orders) ───────────────────────────────────────
 
   async getDashboard(tenantId: string, branchId?: string) {
