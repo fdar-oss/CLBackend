@@ -146,6 +146,56 @@ export class PosController {
     );
   }
 
+  // ─── Order Taker Commission ──────────────────────────────────────────────────
+
+  @Get('order-takers')
+  @ApiOperation({ summary: 'List employees who are order takers' })
+  getOrderTakers(@CurrentUser() u: JwtPayload) {
+    return this.posService.getOrderTakers(u.tenantId);
+  }
+
+  @Get('commission-summary')
+  @ApiOperation({ summary: 'Daily commission summary for order takers' })
+  getCommissionSummary(@CurrentUser() u: JwtPayload, @Query('branchId') branchId?: string, @Query('date') date?: string) {
+    return this.posService.getCommissionSummary(u.tenantId, branchId || undefined, date);
+  }
+
+  // ─── Void System ──────────────────────────────────────────────────────────────
+
+  @Post('orders/:id/void')
+  @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER, UserRole.CASHIER, UserRole.WAITER)
+  @ApiOperation({ summary: 'Request or execute a void (role-based)' })
+  async requestVoid(@CurrentUser() u: JwtPayload, @Param('id') id: string, @Body() body: { orderItemId?: string; reason: string }) {
+    const result = await this.posService.requestVoid(u.tenantId, u.sub, u.role, { orderId: id, ...body });
+    this.audit.log({ tenantId: u.tenantId, userId: u.sub, action: 'VOID', resource: 'PosOrder', resourceId: id, newValues: { reason: body.reason, type: body.orderItemId ? 'PARTIAL' : 'FULL' } });
+    return result;
+  }
+
+  @Get('void-requests')
+  @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER)
+  @ApiOperation({ summary: 'List pending void requests' })
+  getVoidRequests(@CurrentUser() u: JwtPayload, @Query('status') status?: string) {
+    return this.posService.getVoidRequests(u.tenantId, status);
+  }
+
+  @Patch('void-requests/:id/approve')
+  @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER)
+  @ApiOperation({ summary: 'Approve a void request' })
+  async approveVoid(@CurrentUser() u: JwtPayload, @Param('id') id: string) {
+    const result = await this.posService.approveVoidRequest(u.tenantId, id, u.sub);
+    this.audit.log({ tenantId: u.tenantId, userId: u.sub, action: 'VOID_APPROVED', resource: 'VoidRequest', resourceId: id });
+    return result;
+  }
+
+  @Patch('void-requests/:id/reject')
+  @Roles(UserRole.TENANT_OWNER, UserRole.MANAGER)
+  @ApiOperation({ summary: 'Reject a void request' })
+  rejectVoid(@CurrentUser() u: JwtPayload, @Param('id') id: string, @Body() body: { rejectionNote?: string }) {
+    return this.posService.rejectVoidRequest(id, u.sub, body.rejectionNote);
+  }
+
+  // ─── Tables ──────────────────────────────────────────────────────────────────
+
   @Patch('tables/:id/cleaning')
   @ApiOperation({ summary: 'Set table to cleaning (auto-releases after 5 min)' })
   setTableCleaning(@CurrentUser() u: JwtPayload, @Param('id') id: string) {

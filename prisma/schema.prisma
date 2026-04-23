@@ -110,6 +110,7 @@ enum OrderStatus {
   COMPLETED
   CANCELLED
   REFUNDED
+  VOID_REQUESTED
 }
 
 enum OrderSource {
@@ -546,6 +547,8 @@ model User {
   posOrders     PosOrder[]
   auditLogs     AuditLog[]
   permission    UserPermission?
+  voidRequests  VoidRequest[] @relation("VoidRequestedBy")
+  voidApprovals VoidRequest[] @relation("VoidApprovedBy")
 
   @@unique([tenantId, email])
   @@map("users")
@@ -852,6 +855,11 @@ model PosOrder {
   total           Decimal     @db.Decimal(10, 2)
   notes           String?
   kotNumber       String? // Kitchen Order Ticket
+  // Order Taker Commission
+  orderTakerId    String?
+  orderTakerName  String? // snapshot
+  commissionRate  Decimal?    @db.Decimal(5, 2) // percentage at time of order
+  commissionAmount Decimal?   @db.Decimal(10, 2) // subtotal × rate
   // FBR
   fbrInvoiceNo    String?
   fbrQrCode       String?
@@ -875,10 +883,32 @@ model PosOrder {
   payments       PosPayment[]
   kitchenTickets KitchenTicket[]
   refunds        Refund[]
+  voidRequests   VoidRequest[]
 
   @@index([branchId, createdAt])
   @@index([tenantId, status])
   @@map("pos_orders")
+}
+
+model VoidRequest {
+  id            String   @id @default(cuid())
+  tenantId      String
+  orderId       String
+  orderItemId   String?  // null = full void, set = partial (single item)
+  type          String   // FULL_VOID, PARTIAL_VOID (item removal)
+  reason        String   // mandatory reason
+  requestedById String
+  approvedById  String?
+  status        String   @default("PENDING") // PENDING, APPROVED, REJECTED
+  rejectionNote String?
+  createdAt     DateTime @default(now())
+  processedAt   DateTime?
+
+  order       PosOrder @relation(fields: [orderId], references: [id])
+  requestedBy User     @relation("VoidRequestedBy", fields: [requestedById], references: [id])
+  approvedBy  User?    @relation("VoidApprovedBy", fields: [approvedById], references: [id])
+
+  @@map("void_requests")
 }
 
 model PosOrderItem {
@@ -1435,6 +1465,8 @@ model Employee {
   workingDaysPerMonth Int        @default(26)
   paidOffDays     Int            @default(4) // paid days off per month
   isClosingStaff  Boolean        @default(false) // no overtime for regular closing
+  isOrderTaker    Boolean        @default(false) // earns commission on orders they bring
+  commissionRate  Decimal?       @db.Decimal(5, 2) // percentage, default 10
   bankAccount     String?
   bankName        String?
   emergencyContact String?

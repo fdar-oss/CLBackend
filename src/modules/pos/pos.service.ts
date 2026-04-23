@@ -75,6 +75,17 @@ export class PosService {
     const takeaway = completedOrders.filter(o => o.orderType === 'TAKEAWAY').length;
     const delivery = completedOrders.filter(o => o.orderType === 'DELIVERY').length;
 
+    // Commission summary
+    const commissionOrders = completedOrders.filter(o => o.orderTakerId);
+    const totalCommission = commissionOrders.reduce((s, o) => s + Number((o as any).commissionAmount || 0), 0);
+    const commissionByTaker: Record<string, { name: string; orders: number; commission: number }> = {};
+    for (const o of commissionOrders) {
+      const key = o.orderTakerId!;
+      if (!commissionByTaker[key]) commissionByTaker[key] = { name: (o as any).orderTakerName || 'Unknown', orders: 0, commission: 0 };
+      commissionByTaker[key].orders += 1;
+      commissionByTaker[key].commission += Number((o as any).commissionAmount || 0);
+    }
+
     const reportData = {
       branchName: shift.branch.name,
       openedBy: shift.openedBy.fullName,
@@ -98,6 +109,10 @@ export class PosService {
       avgOrderValue: totalOrders > 0 ? totalSales / totalOrders : 0,
       orderTypes: { dineIn, takeaway, delivery },
       topItems,
+      // Commission
+      totalCommission,
+      commissionByTaker: Object.values(commissionByTaker),
+      netCashAfterCommission: closingCash - totalCommission,
     };
 
     const closed = await this.prisma.posShift.update({
@@ -161,7 +176,7 @@ export class PosService {
     const orderNumber = `ORD-${new Date().getFullYear()}-${String(count + 1).padStart(5, '0')}`;
 
     // Calculate totals
-    const { items, tableId, customerId, orderType, notes, source, paymentMethod, servedById, discount } = data;
+    const { items, tableId, customerId, orderType, notes, source, paymentMethod, servedById, discount, orderTakerId } = data;
 
     // DINE_IN must have a table
     if ((orderType || 'DINE_IN') === 'DINE_IN' && !tableId) {
@@ -237,6 +252,22 @@ export class PosService {
     const taxAmount = parseFloat(((subtotal * effectiveTaxRate) / 100).toFixed(2));
     const total = parseFloat((subtotal + taxAmount).toFixed(2));
 
+    // Order taker commission
+    let orderTakerName: string | null = null;
+    let commissionRate: number | null = null;
+    let commissionAmount: number | null = null;
+    if (orderTakerId) {
+      const taker = await this.prisma.employee.findUnique({
+        where: { id: orderTakerId },
+        select: { fullName: true, commissionRate: true, isOrderTaker: true },
+      });
+      if (taker?.isOrderTaker) {
+        orderTakerName = taker.fullName;
+        commissionRate = Number(taker.commissionRate ?? 10);
+        commissionAmount = parseFloat((subtotal * commissionRate / 100).toFixed(2));
+      }
+    }
+
     const order = await this.prisma.posOrder.create({
       data: {
         tenantId,
@@ -253,6 +284,10 @@ export class PosService {
         discountAmount,
         taxAmount,
         total,
+        orderTakerId: orderTakerId || null,
+        orderTakerName,
+        commissionRate,
+        commissionAmount,
         notes: discountNotes ? `${notes || ''}${notes ? ' | ' : ''}Discount: ${discountNotes}` : notes,
         orderItems: {
           create: orderItems.map(({ modifiers, ...item }) => ({
@@ -508,6 +543,241 @@ export class PosService {
     });
 
     return { message: 'Refund processed' };
+  }
+
+  // ─── Order Taker Commission ───────────────────────────────────────────────────
+
+  async getCommissionSummary(tenantId: string, branchId?: string, date?: string) {
+    const targetDate = date ? new Date(date) : new Date();
+    const dayStart = new Date(targetDate); dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(targetDate); dayEnd.setHours(23, 59, 59, 999);
+
+    const orders = await this.prisma.posOrder.findMany({
+      where: {
+        tenantId,
+        ...(branchId && { branchId }),
+        status: 'COMPLETED',
+        orderTakerId: { not: null },
+        completedAt: { gte: dayStart, lte: dayEnd },
+      },
+      select: {
+        id: true, orderNumber: true, subtotal: true, total: true,
+        orderTakerId: true, orderTakerName: true, commissionRate: true, commissionAmount: true,
+        completedAt: true, orderType: true,
+      },
+    });
+
+    // Group by order taker
+    const takerMap: Record<string, { name: string; rate: number; orders: number; subtotal: number; commission: number; items: any[] }> = {};
+    for (const o of orders) {
+      const key = o.orderTakerId!;
+      if (!takerMap[key]) {
+        takerMap[key] = { name: o.orderTakerName || 'Unknown', rate: Number(o.commissionRate || 10), orders: 0, subtotal: 0, commission: 0, items: [] };
+      }
+      takerMap[key].orders += 1;
+      takerMap[key].subtotal += Number(o.subtotal);
+      takerMap[key].commission += Number(o.commissionAmount || 0);
+      takerMap[key].items.push({ orderNumber: o.orderNumber, subtotal: Number(o.subtotal), commission: Number(o.commissionAmount), type: o.orderType });
+    }
+
+    const takers = Object.entries(takerMap).map(([id, data]) => ({ orderTakerId: id, ...data }));
+    const totalCommission = takers.reduce((s, t) => s + t.commission, 0);
+
+    return { date: targetDate.toISOString().slice(0, 10), takers, totalCommission, totalOrders: orders.length };
+  }
+
+  async getOrderTakers(tenantId: string) {
+    return this.prisma.employee.findMany({
+      where: { tenantId, isOrderTaker: true, isActive: true },
+      select: { id: true, fullName: true, employeeCode: true, commissionRate: true },
+      orderBy: { fullName: 'asc' },
+    });
+  }
+
+  // ─── Void System ─────────────────────────────────────────────────────────────
+
+  static readonly VOID_REASONS = [
+    'Customer left without paying',
+    'Customer changed mind',
+    'Wrong order punched',
+    'Item out of stock',
+    'Duplicate order',
+    'Other',
+  ];
+
+  /**
+   * Request or execute a void.
+   * - TENANT_OWNER: instant void, no approval needed
+   * - MANAGER: instant void for pending orders within same day
+   * - CASHIER/WAITER: creates a void REQUEST that needs approval
+   */
+  async requestVoid(tenantId: string, userId: string, userRole: string, data: {
+    orderId: string; orderItemId?: string; reason: string;
+  }) {
+    const order = await this.getOrder(tenantId, data.orderId);
+    if (order.status === 'CANCELLED' || order.status === 'REFUNDED') {
+      throw new BadRequestException('Order is already cancelled/refunded');
+    }
+
+    const isOwner = userRole === 'TENANT_OWNER';
+    const isManager = userRole === 'MANAGER';
+    const type = data.orderItemId ? 'PARTIAL_VOID' : 'FULL_VOID';
+
+    // Owner: instant void, no limits
+    if (isOwner) {
+      return this.executeVoid(tenantId, data.orderId, data.orderItemId, data.reason, userId);
+    }
+
+    // Manager: instant void for pending/today orders
+    if (isManager) {
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const orderDate = new Date(order.createdAt); orderDate.setHours(0, 0, 0, 0);
+      if (orderDate >= today && ['PENDING', 'CONFIRMED', 'IN_PROGRESS'].includes(order.status)) {
+        return this.executeVoid(tenantId, data.orderId, data.orderItemId, data.reason, userId);
+      }
+    }
+
+    // Cashier/Waiter or Manager for old/completed orders: create request
+    const request = await this.prisma.voidRequest.create({
+      data: {
+        tenantId,
+        orderId: data.orderId,
+        orderItemId: data.orderItemId || null,
+        type,
+        reason: data.reason,
+        requestedById: userId,
+        status: 'PENDING',
+      },
+      include: {
+        order: { select: { orderNumber: true, total: true } },
+        requestedBy: { select: { fullName: true } },
+      },
+    });
+
+    // Mark order as void requested
+    if (type === 'FULL_VOID') {
+      await this.prisma.posOrder.update({
+        where: { id: data.orderId },
+        data: { status: 'VOID_REQUESTED' },
+      });
+    }
+
+    return { request, message: 'Void request submitted for approval' };
+  }
+
+  async executeVoid(tenantId: string, orderId: string, orderItemId: string | null | undefined, reason: string, userId: string) {
+    if (orderItemId) {
+      // Partial void — remove single item
+      return this.executePartialVoid(tenantId, orderId, orderItemId, reason, userId);
+    }
+
+    // Full void
+    const order = await this.getOrder(tenantId, orderId);
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.posOrder.update({
+        where: { id: orderId },
+        data: {
+          status: 'CANCELLED',
+          cancelledAt: new Date(),
+          cancelReason: reason,
+        },
+      });
+
+      // Free the table if occupied
+      if (order.tableId) {
+        await tx.restaurantTable.update({
+          where: { id: order.tableId },
+          data: { status: 'AVAILABLE', occupiedSince: null, currentOrderId: null, servedBy: null },
+        });
+      }
+    });
+
+    return { message: `Order ${order.orderNumber} voided — ${reason}`, voided: true };
+  }
+
+  async executePartialVoid(tenantId: string, orderId: string, orderItemId: string, reason: string, userId: string) {
+    const order = await this.getOrder(tenantId, orderId);
+    const item = order.orderItems.find((i: any) => i.id === orderItemId);
+    if (!item) throw new NotFoundException('Order item not found');
+
+    await this.prisma.$transaction(async (tx) => {
+      // Remove the item
+      await tx.posOrderItem.delete({ where: { id: orderItemId } });
+
+      // Recalculate order totals
+      const remaining = await tx.posOrderItem.findMany({ where: { orderId } });
+      if (remaining.length === 0) {
+        // All items removed — void entire order
+        await tx.posOrder.update({
+          where: { id: orderId },
+          data: { status: 'CANCELLED', cancelledAt: new Date(), cancelReason: `All items voided — ${reason}`, subtotal: 0, taxAmount: 0, total: 0 },
+        });
+        if (order.tableId) {
+          await tx.restaurantTable.update({
+            where: { id: order.tableId },
+            data: { status: 'AVAILABLE', occupiedSince: null, currentOrderId: null, servedBy: null },
+          });
+        }
+      } else {
+        const newSubtotal = remaining.reduce((s, i) => s + Number(i.unitPrice) * i.quantity, 0);
+        const taxRate = Number(remaining[0]?.taxRate ?? 0);
+        const newTax = parseFloat(((newSubtotal * taxRate) / 100).toFixed(2));
+        const newTotal = parseFloat((newSubtotal + newTax).toFixed(2));
+        await tx.posOrder.update({
+          where: { id: orderId },
+          data: { subtotal: newSubtotal, taxAmount: newTax, total: newTotal, notes: `Item voided: ${item.itemName} — ${reason}` },
+        });
+      }
+    });
+
+    return { message: `${item.itemName} removed from order — ${reason}`, voided: true };
+  }
+
+  async getVoidRequests(tenantId: string, status?: string) {
+    return this.prisma.voidRequest.findMany({
+      where: { tenantId, ...(status && { status }) },
+      include: {
+        order: { select: { orderNumber: true, total: true, status: true, orderItems: true } },
+        requestedBy: { select: { fullName: true, role: true } },
+        approvedBy: { select: { fullName: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async approveVoidRequest(tenantId: string, requestId: string, userId: string) {
+    const req = await this.prisma.voidRequest.findUnique({ where: { id: requestId } });
+    if (!req || req.status !== 'PENDING') throw new BadRequestException('Request not found or already processed');
+
+    // Execute the void
+    await this.executeVoid(tenantId, req.orderId, req.orderItemId, req.reason, userId);
+
+    return this.prisma.voidRequest.update({
+      where: { id: requestId },
+      data: { status: 'APPROVED', approvedById: userId, processedAt: new Date() },
+    });
+  }
+
+  async rejectVoidRequest(requestId: string, userId: string, rejectionNote?: string) {
+    const req = await this.prisma.voidRequest.findUnique({
+      where: { id: requestId },
+      include: { order: { select: { status: true } } },
+    });
+    if (!req || req.status !== 'PENDING') throw new BadRequestException('Request not found or already processed');
+
+    // Restore order status if it was marked as VOID_REQUESTED
+    if (req.order?.status === 'VOID_REQUESTED') {
+      await this.prisma.posOrder.update({
+        where: { id: req.orderId },
+        data: { status: 'PENDING' },
+      });
+    }
+
+    return this.prisma.voidRequest.update({
+      where: { id: requestId },
+      data: { status: 'REJECTED', approvedById: userId, rejectionNote, processedAt: new Date() },
+    });
   }
 
   // ─── Tables ──────────────────────────────────────────────────────────────────
