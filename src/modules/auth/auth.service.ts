@@ -79,7 +79,7 @@ export class AuthService {
     };
   }
 
-  async refreshTokens(userId: string, tenantId: string, rawRefreshToken: string) {
+  async refreshTokensByToken(rawRefreshToken: string) {
     const storedToken = await this.prisma.refreshToken.findUnique({
       where: { token: rawRefreshToken },
       include: { user: true },
@@ -87,7 +87,6 @@ export class AuthService {
 
     if (
       !storedToken ||
-      storedToken.userId !== userId ||
       storedToken.revokedAt ||
       storedToken.expiresAt < new Date()
     ) {

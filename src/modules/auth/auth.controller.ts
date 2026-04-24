@@ -30,7 +30,7 @@ export class AuthController {
     res.cookie('refreshToken', result.refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      sameSite: 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     });
 
@@ -54,18 +54,12 @@ export class AuthController {
       return { message: 'Refresh token required' };
     }
 
-    // Decode without verifying to get user info for lookup
-    const payload = this.decodeToken(token);
-    const result = await this.authService.refreshTokens(
-      payload.sub,
-      payload.tenantId,
-      token,
-    );
+    const result = await this.authService.refreshTokensByToken(token);
 
     res.cookie('refreshToken', result.refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      sameSite: 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
@@ -105,8 +99,4 @@ export class AuthController {
     return this.authService.changePassword(user.sub, dto);
   }
 
-  private decodeToken(token: string): JwtPayload {
-    const [, payload] = token.split('.');
-    return JSON.parse(Buffer.from(payload, 'base64url').toString());
-  }
 }
