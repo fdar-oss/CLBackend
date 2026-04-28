@@ -530,7 +530,7 @@ export class InventoryService {
       const defaultLocation = order.branch.stockLocations[0];
       if (!defaultLocation) return;
 
-      const isTakeaway = order.orderType === 'TAKEAWAY' || order.orderType === 'DELIVERY';
+      const needsPackaging = order.orderType === 'TAKEAWAY' || order.orderType === 'DELIVERY' || order.needsPackaging;
 
       // ── Recipe-based deductions ──
       for (const item of order.orderItems) {
@@ -573,8 +573,8 @@ export class InventoryService {
         }
       }
 
-      // ── Packaging auto-deduction (takeaway/delivery only, config-driven) ──
-      if (isTakeaway) {
+      // ── Packaging auto-deduction (takeaway/delivery/needsPackaging) ──
+      if (needsPackaging) {
         await this.deductPackaging(order, defaultLocation.id);
       }
     } catch (err) {

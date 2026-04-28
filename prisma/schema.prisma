@@ -867,6 +867,8 @@ model PosOrder {
   // Delivery
   deliveryAddress String?
   deliveryFee     Decimal?    @db.Decimal(10, 2)
+  // Extra packaging (dine-in customer requesting takeaway cups)
+  needsPackaging  Boolean     @default(false)
   // Timestamps
   cancelledAt     DateTime?
   cancelReason    String?
