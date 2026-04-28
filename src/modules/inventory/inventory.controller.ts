@@ -31,6 +31,20 @@ export class InventoryController {
     return this.inventoryService.updateStockItem(u.tenantId, id, body);
   }
 
+  @Get('stock-items/:id/check-delete')
+  @Roles(UserRole.TENANT_OWNER)
+  @ApiOperation({ summary: 'Check what data is linked before deleting' })
+  checkDelete(@CurrentUser() u: JwtPayload, @Param('id') id: string) {
+    return this.inventoryService.checkStockItemDeletion(u.tenantId, id);
+  }
+
+  @Delete('stock-items/:id')
+  @Roles(UserRole.TENANT_OWNER)
+  @ApiOperation({ summary: 'Delete stock item (hard if no data, soft if linked)' })
+  deleteStockItem(@CurrentUser() u: JwtPayload, @Param('id') id: string) {
+    return this.inventoryService.deleteStockItem(u.tenantId, id);
+  }
+
   // ─── Stock Batches (FIFO) ─────────────────────────────────────────────────
 
   @Post('stock-items/:id/batches')

@@ -30,7 +30,7 @@ export class InventoryService {
 
   async getStockItems(tenantId: string) {
     return this.prisma.stockItem.findMany({
-      where: { tenantId, isActive: true },
+      where: { tenantId, isActive: true, isDeleted: false },
       include: {
         category: true,
         batches: {
@@ -46,6 +46,70 @@ export class InventoryService {
     const item = await this.prisma.stockItem.findFirst({ where: { id, tenantId } });
     if (!item) throw new NotFoundException('Stock item not found');
     return this.prisma.stockItem.update({ where: { id }, data });
+  }
+
+  async checkStockItemDeletion(tenantId: string, id: string) {
+    const item = await this.prisma.stockItem.findFirst({
+      where: { id, tenantId },
+      include: {
+        _count: {
+          select: {
+            batches: true,
+            recipeIngredients: true,
+            stockMovements: true,
+            usedInPrepRecipes: true,
+          },
+        },
+      },
+    });
+    if (!item) throw new NotFoundException('Stock item not found');
+
+    const links: string[] = [];
+    if (item._count.batches > 0) links.push(`${item._count.batches} batch(es)`);
+    if (item._count.recipeIngredients > 0) links.push(`${item._count.recipeIngredients} recipe(s)`);
+    if (item._count.usedInPrepRecipes > 0) links.push(`${item._count.usedInPrepRecipes} prep recipe(s)`);
+    if (item._count.stockMovements > 0) links.push(`${item._count.stockMovements} movement(s)`);
+
+    return {
+      hasData: links.length > 0,
+      links,
+      mode: links.length > 0 ? 'soft' : 'hard',
+    };
+  }
+
+  async deleteStockItem(tenantId: string, id: string) {
+    const item = await this.prisma.stockItem.findFirst({
+      where: { id, tenantId },
+      include: {
+        _count: {
+          select: {
+            batches: true,
+            recipeIngredients: true,
+            stockMovements: true,
+            usedInPrepRecipes: true,
+          },
+        },
+      },
+    });
+    if (!item) throw new NotFoundException('Stock item not found');
+
+    const hasData = item._count.batches > 0
+      || item._count.recipeIngredients > 0
+      || item._count.stockMovements > 0
+      || item._count.usedInPrepRecipes > 0;
+
+    if (hasData) {
+      // Soft delete — keep the record for historical data
+      await this.prisma.stockItem.update({
+        where: { id },
+        data: { isDeleted: true, isActive: false },
+      });
+      return { deleted: true, mode: 'soft' };
+    }
+
+    // Hard delete — no linked data
+    await this.prisma.stockItem.delete({ where: { id } });
+    return { deleted: true, mode: 'hard' };
   }
 
   // ─── Stock Batches (FIFO brand tracking) ─────────────────────────────────────
