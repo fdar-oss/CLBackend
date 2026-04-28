@@ -1,9 +1,11 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { InventoryService } from '../inventory/inventory.service';
 
 @Injectable()
 export class ProcurementService {
+  private readonly logger = new Logger(ProcurementService.name);
+
   constructor(
     private prisma: PrismaService,
     private inventoryService: InventoryService,
@@ -172,8 +174,11 @@ export class ProcurementService {
 
       return grn;
     }).then(async (grn) => {
-      // Record stock movements for received goods
+      // Record stock movements + create FIFO batches for received goods
       for (const line of data.lines) {
+        if (line.receivedQty <= 0) continue;
+
+        // Stock movement
         await this.inventoryService.recordMovement({
           stockItemId: line.stockItemId,
           locationId: data.locationId,
@@ -183,6 +188,23 @@ export class ProcurementService {
           reference: grn.id,
           referenceType: 'GRN',
         }).catch(() => {});
+
+        // Auto-create FIFO batch
+        const totalCost = line.unitCost * line.receivedQty;
+        await this.inventoryService.addBatch(line.stockItemId, {
+          brandName: line.brandName || po.vendor?.name || 'Unknown',
+          supplier: po.vendor?.name || null,
+          packSize: line.receivedQty,
+          packUnit: line.unit || null,
+          purchasePrice: totalCost,
+          locationId: data.locationId,
+          receivedDate: new Date(),
+          expiryDate: line.expiryDate || null,
+          batchNumber: line.batchNumber || grn.grnNumber,
+          notes: `Auto-created from ${grn.grnNumber}`,
+        }).catch((err) => {
+          this.logger.warn(`Batch creation failed for ${line.stockItemId}: ${err.message}`);
+        });
       }
       return grn;
     });
