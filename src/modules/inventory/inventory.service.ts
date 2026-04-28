@@ -530,7 +530,9 @@ export class InventoryService {
       const defaultLocation = order.branch.stockLocations[0];
       if (!defaultLocation) return;
 
-      const needsPackaging = order.orderType === 'TAKEAWAY' || order.orderType === 'DELIVERY' || order.needsPackaging;
+      const isTakeaway = order.orderType === 'TAKEAWAY' || order.orderType === 'DELIVERY';
+      const needsBeveragePackaging = isTakeaway || order.needsPackaging;
+      const needsFoodPackaging = isTakeaway || order.needsFoodPackaging;
 
       // ── Recipe-based deductions ──
       for (const item of order.orderItems) {
@@ -573,16 +575,16 @@ export class InventoryService {
         }
       }
 
-      // ── Packaging auto-deduction (takeaway/delivery/needsPackaging) ──
-      if (needsPackaging) {
-        await this.deductPackaging(order, defaultLocation.id);
+      // ── Packaging auto-deduction ──
+      if (needsBeveragePackaging || needsFoodPackaging) {
+        await this.deductPackaging(order, defaultLocation.id, needsBeveragePackaging, needsFoodPackaging);
       }
     } catch (err) {
       this.logger.error(`Stock deduction error for order ${payload.orderId}`, err);
     }
   }
 
-  private async deductPackaging(order: any, locationId: string) {
+  private async deductPackaging(order: any, locationId: string, beveragePackaging = true, foodPackaging = true) {
     // Load packaging rules for this tenant — if none exist, nothing happens
     const rules = await this.prisma.packagingRule.findMany({
       where: { tenantId: order.tenantId, isActive: true },
@@ -598,6 +600,10 @@ export class InventoryService {
       const sizeTag = itemName.includes('(large)') ? 'LARGE' : 'SMALL';
 
       if (itemType === 'FOOD') hasFood = true;
+
+      // Skip items based on packaging flags
+      if (itemType === 'BEVERAGE' && !beveragePackaging) continue;
+      if (itemType === 'FOOD' && !foodPackaging) continue;
 
       // Find matching per-item rules
       const matching = rules.filter(r =>
@@ -619,22 +625,24 @@ export class InventoryService {
       }
     }
 
-    // Per-order rules (e.g. 1 carry bag per order)
-    const perOrderRules = rules.filter(r =>
-      r.scope === 'PER_ORDER' &&
-      orderTypes.includes(r.orderType) &&
-      (r.itemType === 'ANY' || (r.itemType === 'FOOD' && hasFood))
-    );
+    // Per-order rules (e.g. 1 carry bag per order) — only if food packaging is on
+    if (foodPackaging) {
+      const perOrderRules = rules.filter(r =>
+        r.scope === 'PER_ORDER' &&
+        orderTypes.includes(r.orderType) &&
+        (r.itemType === 'ANY' || (r.itemType === 'FOOD' && hasFood))
+      );
 
-    for (const rule of perOrderRules) {
-      await this.recordMovement({
-        stockItemId: rule.stockItemId,
-        locationId,
-        type: 'SALE_DEDUCTION',
-        quantity: rule.quantity * -1,
-        reference: order.id,
-        referenceType: 'PACKAGING',
-      }).catch(err => this.logger.warn(`Packaging deduction failed: ${err.message}`));
+      for (const rule of perOrderRules) {
+        await this.recordMovement({
+          stockItemId: rule.stockItemId,
+          locationId,
+          type: 'SALE_DEDUCTION',
+          quantity: rule.quantity * -1,
+          reference: order.id,
+          referenceType: 'PACKAGING',
+        }).catch(err => this.logger.warn(`Packaging deduction failed: ${err.message}`));
+      }
     }
   }
 

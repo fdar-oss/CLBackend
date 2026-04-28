@@ -289,6 +289,7 @@ export class PosService {
         commissionRate,
         commissionAmount,
         needsPackaging: data.needsPackaging || false,
+        needsFoodPackaging: data.needsFoodPackaging || false,
         notes: discountNotes ? `${notes || ''}${notes ? ' | ' : ''}Discount: ${discountNotes}` : notes,
         orderItems: {
           create: orderItems.map(({ modifiers, ...item }) => ({
